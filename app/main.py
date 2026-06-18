@@ -1,110 +1,139 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.chats import router as chats_router
+from app.config import settings
 from app.logging_config import configure_logging
-from app.models import (
-    ChatMessageCreateRequest,
-    ChatTurnResponse,
-    QueryRequest,
-    QueryResponse,
-    SessionCreateRequest,
-    SessionMessagesResponse,
-    SessionResponse,
-)
-from app.query_service import QueryServiceError, query_service
-from app.storage import storage
+from app.schemas.query import QueryRequest, QueryResponse
+from app.services.chat_service import ChatService
+from app.services.chat_turn_service import ChatTurnService
+from app.services.query_service import QueryService, QueryServiceError
+from app.storage.mysql import storage
 
 configure_logging()
 LOGGER = logging.getLogger(__name__)
 
-app = FastAPI(title="wiki-backend")
 
-app.add_middleware(
-    CORSMiddleware,
-    # allow_origins=["*"],
-    allow_origins=[
-        "http://127.0.0.1:8080",
-        "http://localhost:8080"
+def create_app(
+    *,
+    chat_service: ChatService | None = None,
+    chat_turn_service: ChatTurnService | None = None,
+    query_service: QueryService | None = None,
+    initialize_storage: bool = True,
+) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if app.state.initialize_storage:
+            storage.initialize()
+        if not hasattr(app.state, "chat_service"):
+            app.state.chat_service = ChatService(storage)
+        if not hasattr(app.state, "query_service"):
+            app.state.query_service = QueryService(Path(settings.llm_wiki_repo_path))
+        if not hasattr(app.state, "chat_turn_service"):
+            app.state.chat_turn_service = ChatTurnService(
+                chat_service=app.state.chat_service,
+                query_service=app.state.query_service,
+                history_limit=settings.chat_history_limit,
+            )
+        LOGGER.info("wiki-backend started")
+        yield
+
+    app = FastAPI(
+        title=settings.app_name,
+        description=(
+            "Wiki Backend API，提供健康检查、单轮知识库问答，以及多轮聊天会话能力。"
+            "\n\n"
+            "接口分为三类："
+            "\n"
+            "- `health`：用于服务存活检查。"
+            "\n"
+            "- `query`：无状态单轮问答，每次请求独立执行，不保存会话历史。"
+            "\n"
+            "- `chats`：有状态多轮聊天，消息会写入 MySQL，可按会话持续追问。"
+        ),
+        lifespan=lifespan,
+    )
+    app.state.initialize_storage = initialize_storage
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
         ],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    storage.initialize()
-    LOGGER.info("wiki-backend started")
-
-
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.post("/api/query", response_model=QueryResponse)
-def run_query(request: QueryRequest) -> QueryResponse:
-    try:
-        result = query_service.run(request.question)
-    except QueryServiceError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    return QueryResponse(answer=result.answer, sources=result.sources)
-
-
-@app.get("/api/sessions", response_model=list[SessionResponse])
-def list_sessions() -> list[SessionResponse]:
-    return storage.list_sessions()
-
-
-@app.post("/api/sessions", response_model=SessionResponse)
-def create_session(request: SessionCreateRequest) -> SessionResponse:
-    return storage.create_session(request.title)
-
-
-@app.get("/api/sessions/{session_id}/messages", response_model=SessionMessagesResponse)
-def list_session_messages(session_id: str) -> SessionMessagesResponse:
-    session = storage.get_session(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="session not found")
-    return SessionMessagesResponse(session=session, messages=storage.list_messages(session_id))
-
-
-@app.post("/api/sessions/{session_id}/messages", response_model=ChatTurnResponse)
-def send_message(session_id: str, request: ChatMessageCreateRequest) -> ChatTurnResponse:
-    session = storage.get_session(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="session not found")
-
-    user_message = storage.add_message(session_id=session_id, role="user", content=request.content)
-
-    try:
-        result = query_service.run(request.content)
-    except QueryServiceError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    assistant_message = storage.add_message(
-        session_id=session_id,
-        role="assistant",
-        content=result.answer,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
-    latest_session = storage.get_session(session_id)
-    if latest_session is None:
-        raise HTTPException(status_code=500, detail="session disappeared")
 
-    return ChatTurnResponse(
-        session=latest_session,
-        user_message=user_message,
-        assistant_message=assistant_message,
+    if chat_service is not None:
+        app.state.chat_service = chat_service
+    if query_service is not None:
+        app.state.query_service = query_service
+    if chat_turn_service is not None:
+        app.state.chat_turn_service = chat_turn_service
+
+    @app.get(
+        "/health",
+        tags=["health"],
+        summary="检查服务状态",
+        description="用于确认 FastAPI 服务进程是否正常启动。该接口不访问 LLM，也不依赖聊天业务。",
     )
+    def health() -> dict[str, str]:
+        """返回最小化健康检查结果。"""
+        return {"status": "ok"}
+
+    @app.post(
+        "/api/query",
+        response_model=QueryResponse,
+        tags=["query"],
+        summary="执行单轮知识库问答",
+        description=(
+            "接收一个用户问题，调用知识库检索与 LLM 生成最终答案。"
+            "\n\n"
+            "该接口是无状态的："
+            "\n"
+            "- 不创建聊天会话"
+            "\n"
+            "- 不保存消息历史到 MySQL"
+            "\n"
+            "- 适合临时提问、调试检索质量、验证知识库回答效果"
+        ),
+    )
+    def run_query(
+        payload: QueryRequest,
+        query_service_dependency: QueryService = Depends(get_query_service),
+    ) -> QueryResponse:
+        """执行一次独立问答并返回答案、来源文件和相关页面。"""
+        try:
+            result = query_service_dependency.run(payload.question)
+        except QueryServiceError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return QueryResponse(
+            answer=result.answer,
+            sources=result.sources,
+            relevant_pages=result.relevant_pages,
+        )
+
+    app.include_router(chats_router)
+    return app
+
+
+def get_query_service(request: Request) -> QueryService:
+    return request.app.state.query_service
+
+
+app = create_app()
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("app.main:app", host="127.0.0.1", port=8081, reload=True)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from pydantic import DirectoryPath, Field
@@ -16,9 +15,31 @@ class Settings(BaseSettings):
 
     app_name: str = "wiki-backend"
     llm_wiki_repo_path: DirectoryPath = Field(
-        default=Path(os.getenv("WIKI_AGENT_REPO_PATH", "..\\llm-wiki-agent")).resolve()
+        default=Path("..\\llm-wiki-agent").resolve(),
+        validation_alias="WIKI_AGENT_REPO_PATH",
     )
-    db_path: Path = Field(default=Path(os.getenv("WIKI_BACKEND_DB_PATH", "data/wiki_backend.db")))
+    mysql_host: str = Field(
+        default="127.0.0.1",
+        validation_alias="WIKI_BACKEND_MYSQL_HOST",
+    )
+    mysql_port: int = Field(default=3306, validation_alias="WIKI_BACKEND_MYSQL_PORT")
+    mysql_user: str = Field(default="root", validation_alias="WIKI_BACKEND_MYSQL_USER")
+    mysql_password: str = Field(
+        default="",
+        validation_alias="WIKI_BACKEND_MYSQL_PASSWORD",
+    )
+    mysql_database: str = Field(
+        default="wiki_backend",
+        validation_alias="WIKI_BACKEND_MYSQL_DATABASE",
+    )
+    default_chat_title: str = Field(
+        default="新对话",
+        validation_alias="WIKI_BACKEND_DEFAULT_CHAT_TITLE",
+    )
+    chat_history_limit: int = Field(
+        default=6,
+        validation_alias="WIKI_BACKEND_CHAT_HISTORY_LIMIT",
+    )
 
 
 settings = Settings()

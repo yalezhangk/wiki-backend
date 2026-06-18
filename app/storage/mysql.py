@@ -1,0 +1,497 @@
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+from datetime import datetime
+from typing import Any, Iterator
+from uuid import uuid4
+
+from app.config import settings
+from app.schemas.chat import ChatMessageResponse, ChatResponse
+
+
+class StorageError(RuntimeError):
+    """Raised when a storage operation fails."""
+
+
+class ChatNotFoundError(StorageError):
+    """Raised when a chat cannot be found."""
+
+
+class StorageUnavailableError(StorageError):
+    """Raised when MySQL is unavailable or misconfigured."""
+
+
+class MySQLStorage:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        user: str,
+        password: str,
+        database: str,
+    ) -> None:
+        self._host = host
+        self._port = port
+        self._user = user
+        self._password = password
+        self._database = database
+
+    def initialize(self) -> None:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS chats (
+                        id CHAR(36) PRIMARY KEY COMMENT '会话唯一标识（UUID）',
+                        title VARCHAR(200) NOT NULL COMMENT '会话标题',
+                        status VARCHAR(32) NOT NULL DEFAULT 'active' COMMENT '会话状态',
+                        created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
+                        updated_at DATETIME NOT NULL COMMENT '最后更新时间（UTC）',
+                        last_message_at DATETIME NULL COMMENT '最后一条消息时间（UTC）'
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    COMMENT='聊天会话表'
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS chat_messages (
+                        id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '消息自增主键',
+                        chat_id CHAR(36) NOT NULL COMMENT '所属会话ID',
+                        role VARCHAR(16) NOT NULL COMMENT '消息角色：user或assistant',
+                        content TEXT NOT NULL COMMENT '消息正文',
+                        sources JSON NOT NULL COMMENT '回答引用来源列表（JSON）',
+                        relevant_pages JSON NOT NULL COMMENT '查询命中的Wiki页面列表（JSON）',
+                        created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
+                        CONSTRAINT fk_chat_messages_chat_id
+                            FOREIGN KEY (chat_id) REFERENCES chats(id)
+                            ON DELETE CASCADE
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    COMMENT='聊天消息表'
+                    """
+                )
+                self._apply_schema_comments(cursor)
+                self._ensure_index(cursor, "chats", "idx_chats_updated_at", "updated_at DESC")
+                self._ensure_index(cursor, "chat_messages", "idx_chat_messages_chat_id_id", "chat_id, id")
+                self._ensure_index(
+                    cursor,
+                    "chat_messages",
+                    "idx_chat_messages_chat_id_created_at",
+                    "chat_id, created_at",
+                )
+
+    @contextmanager
+    def connect(self) -> Iterator[Any]:
+        pymysql = self._import_pymysql()
+        try:
+            connection = pymysql.connect(
+                host=self._host,
+                port=self._port,
+                user=self._user,
+                password=self._password,
+                database=self._database,
+                charset="utf8mb4",
+                cursorclass=pymysql.cursors.DictCursor,
+                autocommit=False,
+            )
+        except pymysql.MySQLError as exc:
+            raise StorageUnavailableError("Failed to connect to MySQL.") from exc
+
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def list_chats(self) -> list[ChatResponse]:
+        rows = self._fetch_all(
+            """
+            SELECT
+                c.id,
+                c.title,
+                c.status,
+                c.created_at,
+                c.updated_at,
+                c.last_message_at,
+                (
+                    SELECT m.content
+                    FROM chat_messages AS m
+                    WHERE m.chat_id = c.id
+                    ORDER BY m.id DESC
+                    LIMIT 1
+                ) AS last_message_preview
+            FROM chats AS c
+            ORDER BY c.updated_at DESC
+            """
+        )
+        return [self._chat_from_row(row) for row in rows]
+
+    def create_chat(self, title: str) -> ChatResponse:
+        now = self._utc_now()
+        chat_id = str(uuid4())
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO chats (id, title, status, created_at, updated_at, last_message_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (chat_id, title, "active", now, now, None),
+                )
+                cursor.execute(
+                    """
+                    SELECT id, title, status, created_at, updated_at, last_message_at
+                    FROM chats
+                    WHERE id = %s
+                    """,
+                    (chat_id,),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            raise StorageError("Failed to reload created chat.")
+        return self._chat_from_row(row)
+
+    def get_chat(self, chat_id: str) -> ChatResponse | None:
+        rows = self._fetch_all(
+            """
+            SELECT id, title, status, created_at, updated_at, last_message_at
+            FROM chats
+            WHERE id = %s
+            """,
+            (chat_id,),
+        )
+        if not rows:
+            return None
+        return self._chat_from_row(rows[0])
+
+    def rename_chat(self, chat_id: str, title: str) -> ChatResponse:
+        updated_at = self._utc_now()
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE chats
+                    SET title = %s, updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (title, updated_at, chat_id),
+                )
+                if cursor.rowcount == 0:
+                    raise ChatNotFoundError(f"chat not found: {chat_id}")
+                cursor.execute(
+                    """
+                    SELECT id, title, status, created_at, updated_at, last_message_at
+                    FROM chats
+                    WHERE id = %s
+                    """,
+                    (chat_id,),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            raise StorageError("Failed to reload renamed chat.")
+        return self._chat_from_row(row)
+
+    def list_messages(self, chat_id: str) -> list[ChatMessageResponse]:
+        rows = self._fetch_all(
+            """
+            SELECT id, chat_id, role, content, sources, relevant_pages, created_at
+            FROM chat_messages
+            WHERE chat_id = %s
+            ORDER BY id ASC
+            """,
+            (chat_id,),
+        )
+        return [self._message_from_row(row) for row in rows]
+
+    def list_recent_messages(
+        self,
+        chat_id: str,
+        limit: int,
+        before_message_id: int | None = None,
+    ) -> list[ChatMessageResponse]:
+        if before_message_id is None:
+            query = """
+                SELECT id, chat_id, role, content, sources, relevant_pages, created_at
+                FROM chat_messages
+                WHERE chat_id = %s
+                ORDER BY id DESC
+                LIMIT %s
+            """
+            params: tuple[Any, ...] = (chat_id, limit)
+        else:
+            query = """
+                SELECT id, chat_id, role, content, sources, relevant_pages, created_at
+                FROM chat_messages
+                WHERE chat_id = %s AND id < %s
+                ORDER BY id DESC
+                LIMIT %s
+            """
+            params = (chat_id, before_message_id, limit)
+
+        rows = self._fetch_all(query, params)
+        messages = [self._message_from_row(row) for row in rows]
+        messages.reverse()
+        return messages
+
+    def count_messages(self, chat_id: str) -> int:
+        rows = self._fetch_all(
+            """
+            SELECT COUNT(*) AS message_count
+            FROM chat_messages
+            WHERE chat_id = %s
+            """,
+            (chat_id,),
+        )
+        return int(rows[0]["message_count"]) if rows else 0
+
+    def create_message(
+        self,
+        chat_id: str,
+        role: str,
+        content: str,
+        sources: list[str] | None = None,
+        relevant_pages: list[str] | None = None,
+    ) -> ChatMessageResponse:
+        created_at = self._utc_now()
+        serialized_sources = json.dumps(sources or [], ensure_ascii=False)
+        serialized_relevant_pages = json.dumps(relevant_pages or [], ensure_ascii=False)
+
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO chat_messages (chat_id, role, content, sources, relevant_pages, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        chat_id,
+                        role,
+                        content,
+                        serialized_sources,
+                        serialized_relevant_pages,
+                        created_at,
+                    ),
+                )
+                message_id = int(cursor.lastrowid)
+                cursor.execute(
+                    """
+                    SELECT id, chat_id, role, content, sources, relevant_pages, created_at
+                    FROM chat_messages
+                    WHERE id = %s
+                    """,
+                    (message_id,),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            raise StorageError("Failed to reload created message.")
+        return self._message_from_row(row)
+
+    def update_chat_activity(
+        self,
+        chat_id: str,
+        updated_at: datetime,
+        last_message_at: datetime | None,
+    ) -> ChatResponse:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE chats
+                    SET updated_at = %s, last_message_at = %s
+                    WHERE id = %s
+                    """,
+                    (updated_at, last_message_at, chat_id),
+                )
+                if cursor.rowcount == 0:
+                    raise ChatNotFoundError(f"chat not found: {chat_id}")
+                cursor.execute(
+                    """
+                    SELECT id, title, status, created_at, updated_at, last_message_at
+                    FROM chats
+                    WHERE id = %s
+                    """,
+                    (chat_id,),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            raise StorageError("Failed to reload updated chat.")
+        return self._chat_from_row(row)
+
+    def _fetch_all(self, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        try:
+            with self.connect() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(query, params)
+                    rows = cursor.fetchall()
+        except StorageError:
+            raise
+        except Exception as exc:
+            raise StorageError("Storage query failed.") from exc
+        return list(rows)
+
+    @staticmethod
+    def _apply_schema_comments(cursor: Any) -> None:
+        # CREATE TABLE IF NOT EXISTS does not update comments on existing tables.
+        expected_table_comments = {
+            "chats": "聊天会话表",
+            "chat_messages": "聊天消息表",
+        }
+        expected_column_comments = {
+            "chats": {
+                "id": "会话唯一标识（UUID）",
+                "title": "会话标题",
+                "status": "会话状态",
+                "created_at": "创建时间（UTC）",
+                "updated_at": "最后更新时间（UTC）",
+                "last_message_at": "最后一条消息时间（UTC）",
+            },
+            "chat_messages": {
+                "id": "消息自增主键",
+                "chat_id": "所属会话ID",
+                "role": "消息角色：user或assistant",
+                "content": "消息正文",
+                "sources": "回答引用来源列表（JSON）",
+                "relevant_pages": "查询命中的Wiki页面列表（JSON）",
+                "created_at": "创建时间（UTC）",
+            },
+        }
+        cursor.execute(
+            """
+            SELECT TABLE_NAME, TABLE_COMMENT
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME IN ('chats', 'chat_messages')
+            """
+        )
+        actual_table_comments = {
+            row["TABLE_NAME"]: row["TABLE_COMMENT"] for row in cursor.fetchall()
+        }
+        cursor.execute(
+            """
+            SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, COLUMN_COMMENT
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME IN ('chats', 'chat_messages')
+            """
+        )
+        actual_column_comments: dict[str, dict[str, str]] = {
+            "chats": {},
+            "chat_messages": {},
+        }
+        actual_column_types: dict[str, dict[str, str]] = {
+            "chats": {},
+            "chat_messages": {},
+        }
+        for row in cursor.fetchall():
+            actual_column_comments[row["TABLE_NAME"]][row["COLUMN_NAME"]] = row[
+                "COLUMN_COMMENT"
+            ]
+            actual_column_types[row["TABLE_NAME"]][row["COLUMN_NAME"]] = row[
+                "COLUMN_TYPE"
+            ]
+
+        if (
+            actual_table_comments.get("chats") != expected_table_comments["chats"]
+            or actual_column_comments["chats"] != expected_column_comments["chats"]
+            or any(
+                actual_column_types["chats"].get(column_name) != "datetime"
+                for column_name in ("created_at", "updated_at", "last_message_at")
+            )
+        ):
+            cursor.execute(
+                """
+                ALTER TABLE chats
+                    MODIFY COLUMN id CHAR(36) NOT NULL COMMENT '会话唯一标识（UUID）',
+                    MODIFY COLUMN title VARCHAR(200) NOT NULL COMMENT '会话标题',
+                    MODIFY COLUMN status VARCHAR(32) NOT NULL DEFAULT 'active' COMMENT '会话状态',
+                    MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
+                    MODIFY COLUMN updated_at DATETIME NOT NULL COMMENT '最后更新时间（UTC）',
+                    MODIFY COLUMN last_message_at DATETIME NULL COMMENT '最后一条消息时间（UTC）',
+                    COMMENT = '聊天会话表'
+                """
+            )
+        if (
+            actual_table_comments.get("chat_messages")
+            != expected_table_comments["chat_messages"]
+            or actual_column_comments["chat_messages"]
+            != expected_column_comments["chat_messages"]
+            or actual_column_types["chat_messages"].get("created_at") != "datetime"
+        ):
+            cursor.execute(
+                """
+                ALTER TABLE chat_messages
+                    MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT COMMENT '消息自增主键',
+                    MODIFY COLUMN chat_id CHAR(36) NOT NULL COMMENT '所属会话ID',
+                    MODIFY COLUMN role VARCHAR(16) NOT NULL COMMENT '消息角色：user或assistant',
+                    MODIFY COLUMN content TEXT NOT NULL COMMENT '消息正文',
+                    MODIFY COLUMN sources JSON NOT NULL COMMENT '回答引用来源列表（JSON）',
+                    MODIFY COLUMN relevant_pages JSON NOT NULL COMMENT '查询命中的Wiki页面列表（JSON）',
+                    MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
+                    COMMENT = '聊天消息表'
+                """
+            )
+
+    @staticmethod
+    def _ensure_index(cursor: Any, table_name: str, index_name: str, columns_sql: str) -> None:
+        cursor.execute("SHOW INDEX FROM " + table_name + " WHERE Key_name = %s", (index_name,))
+        if cursor.fetchone() is None:
+            cursor.execute(f"CREATE INDEX {index_name} ON {table_name}({columns_sql})")
+
+    @staticmethod
+    def _utc_now() -> datetime:
+        return datetime.utcnow().replace(microsecond=0)
+
+    @staticmethod
+    def _parse_json_field(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item) for item in value]
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return []
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        return []
+
+    def _chat_from_row(self, row: dict[str, Any]) -> ChatResponse:
+        return ChatResponse(
+            id=str(row["id"]),
+            title=str(row["title"]),
+            status=str(row["status"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            last_message_at=row.get("last_message_at"),
+            last_message_preview=row.get("last_message_preview"),
+        )
+
+    def _message_from_row(self, row: dict[str, Any]) -> ChatMessageResponse:
+        return ChatMessageResponse(
+            id=int(row["id"]),
+            chat_id=str(row["chat_id"]),
+            role=row["role"],
+            content=str(row["content"]),
+            sources=self._parse_json_field(row.get("sources")),
+            relevant_pages=self._parse_json_field(row.get("relevant_pages")),
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _import_pymysql() -> Any:
+        try:
+            import pymysql
+        except ModuleNotFoundError as exc:
+            raise StorageUnavailableError("PyMySQL is not installed.") from exc
+        return pymysql
+
+
+storage = MySQLStorage(
+    host=settings.mysql_host,
+    port=settings.mysql_port,
+    user=settings.mysql_user,
+    password=settings.mysql_password,
+    database=settings.mysql_database,
+)

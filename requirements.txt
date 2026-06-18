@@ -3,3 +3,4 @@ uvicorn==0.35.0
 pydantic==2.11.7
 pydantic-settings==2.10.1
 litellm==1.82.6
+PyMySQL==1.1.1

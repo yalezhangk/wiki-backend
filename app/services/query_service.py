@@ -5,11 +5,12 @@ import json
 import logging
 import re
 import sys
-from dataclasses import dataclass
+import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
-from app.config import settings
+from app.schemas.chat import ChatMessageResponse
+from app.schemas.query import QueryResult
 
 LOGGER = logging.getLogger(__name__)
 SOURCE_PATTERN = re.compile(r"\[\[([^\]]+)\]\]")
@@ -17,13 +18,6 @@ SOURCE_PATTERN = re.compile(r"\[\[([^\]]+)\]\]")
 
 class QueryServiceError(RuntimeError):
     """Raised when the backend cannot complete a wiki query."""
-
-
-@dataclass(frozen=True)
-class QueryResult:
-    answer: str
-    sources: list[str]
-    relevant_pages: list[str]
 
 
 def read_file(path: Path) -> str:
@@ -45,11 +39,7 @@ def find_relevant_pages(question: str, index_content: str, wiki_dir: Path, graph
                 if any("\u4e00" <= char <= "\u9fff" for char in title_lower[index : index + 2])
             )
         else:
-            matched = any(
-                word in question_lower
-                for word in title_lower.split()
-                if len(word) > 2
-            )
+            matched = any(word in question_lower for word in title_lower.split() if len(word) > 2)
 
         if matched:
             page = wiki_dir / href
@@ -59,10 +49,7 @@ def find_relevant_pages(question: str, index_content: str, wiki_dir: Path, graph
     if graph_json.exists() and relevant:
         try:
             graph_data = json.loads(graph_json.read_text(encoding="utf-8"))
-            page_ids = {
-                page.relative_to(wiki_dir).as_posix().replace(".md", "")
-                for page in relevant
-            }
+            page_ids = {page.relative_to(wiki_dir).as_posix().replace(".md", "") for page in relevant}
             neighbors: set[str] = set()
             for edge in graph_data.get("edges", []):
                 if edge.get("confidence", 0) >= 0.7:
@@ -88,11 +75,17 @@ class QueryService:
         self._agent_root = agent_root.resolve()
         self._wiki_dir = self._agent_root / "wiki"
         self._index_file = self._wiki_dir / "index.md"
-        self._schema_file = self._agent_root / "CLAUDE.md"
+        self._schema_file = self._agent_root / "AGENTS.md"
         self._graph_json = self._agent_root / "graph" / "graph.json"
         self._call_llm_fast, self._call_llm_main = self._load_llm_callers()
 
     def run(self, question: str) -> QueryResult:
+        return self._run(question=question, history_messages=[])
+
+    def run_chat_turn(self, question: str, history_messages: Sequence[ChatMessageResponse]) -> QueryResult:
+        return self._run(question=question, history_messages=list(history_messages)[-6:])
+
+    def _run(self, question: str, history_messages: Sequence[ChatMessageResponse]) -> QueryResult:
         normalized_question = question.strip()
         if not normalized_question:
             raise QueryServiceError("question cannot be empty")
@@ -104,12 +97,22 @@ class QueryService:
         relevant_pages = self._select_relevant_pages(normalized_question, index_content)
         pages_context = self._build_pages_context(relevant_pages, index_content)
         schema = read_file(self._schema_file)
+        prompt = self._build_answer_prompt(
+            question=normalized_question,
+            schema=schema,
+            pages_context=pages_context,
+            conversation_history=self._build_conversation_history(history_messages),
+        )
 
-        prompt = self._build_answer_prompt(normalized_question, schema, pages_context)
         LOGGER.info("Running wiki query question=%r relevant_pages=%d", normalized_question, len(relevant_pages))
 
         try:
-            answer = self._call_llm_main(prompt, max_tokens=4096)
+            answer = self._call_llm_with_retry(
+                self._call_llm_main,
+                prompt,
+                max_tokens=4096,
+                operation="answer generation",
+            )
         except Exception as exc:
             raise QueryServiceError("Failed to generate query answer via llm-wiki-agent LLM config.") from exc
 
@@ -137,8 +140,13 @@ class QueryService:
             'e.g. ["sources/foo.md", "concepts/Bar.md"]. Maximum 10 pages.'
         )
         try:
-            raw = self._call_llm_fast(prompt, max_tokens=512)
-        except Exception as exc:
+            raw = self._call_llm_with_retry(
+                self._call_llm_fast,
+                prompt,
+                max_tokens=512,
+                operation="page selection",
+            )
+        except Exception:
             LOGGER.warning("Model page selection failed", exc_info=True)
             return relevant_pages
 
@@ -156,6 +164,24 @@ class QueryService:
 
         return selected_pages or relevant_pages
 
+    @staticmethod
+    def _call_llm_with_retry(
+        caller: Callable[[str, int | None], str],
+        prompt: str,
+        *,
+        max_tokens: int,
+        operation: str,
+    ) -> str:
+        for attempt in range(2):
+            try:
+                return caller(prompt, max_tokens=max_tokens)
+            except Exception as exc:
+                if attempt == 1:
+                    raise
+                LOGGER.warning("LLM %s failed; retrying once: %s", operation, exc)
+                time.sleep(1)
+        raise RuntimeError("unreachable LLM retry state")
+
     def _build_pages_context(self, pages: list[Path], index_content: str) -> str:
         if not pages:
             return f"\n\n### wiki/index.md\n{index_content}"
@@ -167,18 +193,47 @@ class QueryService:
         return "".join(context_parts)
 
     @staticmethod
-    def _build_answer_prompt(question: str, schema: str, pages_context: str) -> str:
-        return f"""You are querying an LLM Wiki to answer a question. Use the wiki pages below to synthesize a thorough answer. Cite sources using [[PageName]] wikilink syntax.
+    def _build_conversation_history(history_messages: Sequence[ChatMessageResponse]) -> str:
+        if not history_messages:
+            return "(none)"
+
+        lines: list[str] = []
+        for message in history_messages:
+            role_label = "User" if message.role == "user" else "Assistant"
+            lines.append(f"{role_label}: {message.content}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_answer_prompt(
+        question: str,
+        schema: str,
+        pages_context: str,
+        conversation_history: str,
+    ) -> str:
+        return f"""You are querying an LLM Wiki to answer a question. Use the wiki pages below to synthesize a thorough answer.
 
 Schema:
 {schema}
 
-Wiki pages:
+Conversation history:
+{conversation_history}
+
+Relevant wiki pages:
 {pages_context}
 
-Question: {question}
+Current user question:
+{question}
 
-Write a well-structured markdown answer with headers, bullets, and [[wikilink]] citations. At the end, add a ## Sources section listing the pages you drew from.
+Requirements:
+- Use the conversation history only to resolve context, references, and ellipsis.
+- The final answer must still be grounded in the wiki pages above.
+- Start with the answer itself. Do not repeat, quote, or paraphrase the current user question.
+- Do not use the current user question as the answer title or as a heading.
+- Cite sources using [[PageName]] wikilink syntax.
+- Write a well-structured markdown answer. Use headers and bullets only when they improve readability.
+- Preserve Markdown block structure: headings must be on their own line, paragraphs must be separated by a blank line, and each bullet must be on its own line.
+- Never collapse headings, paragraphs, or bullet lists into a single line.
+- At the end, add a ## Sources section listing the pages you drew from.
 """
 
     @staticmethod
@@ -214,6 +269,3 @@ Write a well-structured markdown answer with headers, bullets, and [[wikilink]] 
             raise QueryServiceError("llm-wiki-agent tools.llm_config is missing required callables.")
 
         return call_llm_fast, call_llm_main
-
-
-query_service = QueryService(Path(settings.llm_wiki_repo_path))

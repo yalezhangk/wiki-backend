@@ -21,7 +21,7 @@ class StubQueryService:
         history_messages: list[ChatMessageResponse],
     ) -> QueryResult:
         return QueryResult(
-            answer=f"数据库联调回答：{question}",
+            answer=f"## 数据库联调回答\n\n- 问题\n  - {question}\n\n```text\n保留缩进\n```",
             sources=["MySQL联调来源"],
             relevant_pages=["integration/mysql.md"],
         )
@@ -82,11 +82,11 @@ class MySQLIntegrationTests(unittest.TestCase):
 
         turn_response = self.client.post(
             f"/api/chats/{first_chat['id']}/messages",
-            json={"content": "MySQL 能保存多轮会话吗？"},
+            json={"content": "MySQL 能保存多轮会话吗？\n  保留缩进"},
         )
         self.assertEqual(turn_response.status_code, 200)
         turn = turn_response.json()
-        self.assertEqual(turn["chat"]["title"], "MySQL 能保存多轮会话吗？")
+        self.assertEqual(turn["chat"]["title"], "MySQL 能保存多轮会话吗？ 保留缩进")
         self.assertEqual(turn["assistant_message"]["sources"], ["MySQL联调来源"])
         self.assertEqual(
             turn["assistant_message"]["relevant_pages"],
@@ -97,6 +97,12 @@ class MySQLIntegrationTests(unittest.TestCase):
         self.assertEqual(messages_response.status_code, 200)
         messages = messages_response.json()["messages"]
         self.assertEqual([message["role"] for message in messages], ["user", "assistant"])
+        self.assertEqual(messages[0]["content"], "MySQL 能保存多轮会话吗？\n  保留缩进")
+        self.assertEqual(
+            messages[1]["content"],
+            "## 数据库联调回答\n\n- 问题\n  - MySQL 能保存多轮会话吗？\n  保留缩进"
+            "\n\n```text\n保留缩进\n```",
+        )
         self.assertEqual(messages[1]["sources"], ["MySQL联调来源"])
 
         rename_response = self.client.patch(

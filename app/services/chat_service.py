@@ -34,7 +34,7 @@ class ChatService:
         return chat
 
     def rename_chat(self, chat_id: str, title: str) -> ChatResponse:
-        normalized_title = self._normalize_required_text(title, "title")
+        normalized_title = self._normalize_required_single_line_text(title, "title")
         return self._storage.rename_chat(chat_id, normalized_title)
 
     def list_messages(self, chat_id: str) -> list[ChatMessageResponse]:
@@ -64,7 +64,7 @@ class ChatService:
     ) -> ChatMessageResponse:
         if role not in {"user", "assistant"}:
             raise ChatValidationError("role must be user or assistant")
-        normalized_content = self._normalize_required_text(content, "content")
+        normalized_content = self._normalize_required_multiline_text(content, "content")
         self.get_chat(chat_id)
         return self._storage.create_message(
             chat_id=chat_id,
@@ -90,8 +90,15 @@ class ChatService:
         return normalized or None
 
     @staticmethod
-    def _normalize_required_text(value: str, field_name: str) -> str:
+    def _normalize_required_single_line_text(value: str, field_name: str) -> str:
         normalized = " ".join(value.split())
+        if not normalized:
+            raise ChatValidationError(f"{field_name} cannot be empty")
+        return normalized
+
+    @staticmethod
+    def _normalize_required_multiline_text(value: str, field_name: str) -> str:
+        normalized = value.strip()
         if not normalized:
             raise ChatValidationError(f"{field_name} cannot be empty")
         return normalized

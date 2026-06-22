@@ -117,11 +117,21 @@ class ChatsApiTests(unittest.TestCase):
         self.assertEqual(response.json()["title"], "新对话")
 
     def test_get_messages_returns_chat_and_messages(self) -> None:
+        markdown = "## 标题\n\n- 第一项\n  - 嵌套项"
+        self.chat_service.messages.append(
+            ChatMessageResponse(
+                id=1,
+                chat_id="chat-1",
+                role="assistant",
+                content=markdown,
+                created_at=datetime(2026, 6, 17, tzinfo=timezone.utc),
+            )
+        )
         response = self.client.get("/api/chats/chat-1/messages")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["chat"]["id"], "chat-1")
-        self.assertEqual(response.json()["messages"], [])
+        self.assertEqual(response.json()["messages"][0]["content"], markdown)
 
     def test_post_message_returns_turn_payload(self) -> None:
         response = self.client.post("/api/chats/chat-1/messages", json={"content": "hello"})

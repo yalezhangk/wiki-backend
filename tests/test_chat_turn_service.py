@@ -112,6 +112,7 @@ class FakeQueryService:
         self.last_question: str | None = None
         self.last_history: list[ChatMessageResponse] = []
         self.should_fail = False
+        self.answer = "Answer with [[PageA]]"
 
     def run_chat_turn(self, question: str, history_messages: list[ChatMessageResponse]) -> QueryResult:
         if self.should_fail:
@@ -119,7 +120,7 @@ class FakeQueryService:
         self.last_question = question
         self.last_history = list(history_messages)
         return QueryResult(
-            answer="Answer with [[PageA]]",
+            answer=self.answer,
             sources=["PageA"],
             relevant_pages=["topic/page-a.md"],
         )
@@ -143,6 +144,31 @@ class ChatTurnServiceTests(unittest.TestCase):
         self.assertEqual(response.assistant_message.role, "assistant")
         self.assertEqual(response.assistant_message.sources, ["PageA"])
         self.assertEqual(response.chat.title, "这是第一条问题，需要自动命名标题")
+
+    def test_turn_preserves_multiline_markdown_and_normalizes_title(self) -> None:
+        question = "  第一行\n  第二行  "
+        markdown = """  ## 标题
+
+- 第一项
+  - 嵌套项
+
+| 列一 | 列二 |
+| --- | --- |
+| A | B |
+
+> 引用
+
+```python
+value = 1
+```  """
+        self.query_service.answer = markdown
+
+        response = self.service.run_turn("chat-1", question)
+
+        self.assertEqual(response.user_message.content, "第一行\n  第二行")
+        self.assertEqual(response.assistant_message.content, markdown.strip())
+        self.assertEqual(response.assistant_message.content, self.query_service.answer.strip())
+        self.assertEqual(response.chat.title, "第一行 第二行")
 
     def test_second_turn_uses_recent_history_only(self) -> None:
         for index in range(8):

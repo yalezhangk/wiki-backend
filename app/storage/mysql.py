@@ -305,8 +305,6 @@ class MySQLStorage:
                     """,
                     (updated_at, last_message_at, chat_id),
                 )
-                if cursor.rowcount == 0:
-                    raise ChatNotFoundError(f"chat not found: {chat_id}")
                 cursor.execute(
                     """
                     SELECT id, title, status, created_at, updated_at, last_message_at
@@ -317,7 +315,7 @@ class MySQLStorage:
                 )
                 row = cursor.fetchone()
         if row is None:
-            raise StorageError("Failed to reload updated chat.")
+            raise ChatNotFoundError(f"chat not found: {chat_id}")
         return self._chat_from_row(row)
 
     def _fetch_all(self, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:

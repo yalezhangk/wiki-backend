@@ -69,6 +69,14 @@ class ChatMessageResponse(BaseModel):
         description="当消息角色为 `assistant` 时，检索阶段使用的相关页面列表。",
     )
     created_at: datetime = Field(description="消息创建时间。")
+    synthesis_path: str | None = Field(
+        default=None,
+        description="该助手消息保存成 Synthesis 后的 Wiki 相对路径。",
+    )
+    synthesized_at: datetime | None = Field(
+        default=None,
+        description="该助手消息保存为 Synthesis 的时间。",
+    )
 
 
 class ChatMessagesResponse(BaseModel):

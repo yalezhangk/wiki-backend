@@ -132,6 +132,7 @@ class ChatsApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["chat"]["id"], "chat-1")
         self.assertEqual(response.json()["messages"][0]["content"], markdown)
+        self.assertIsNone(response.json()["messages"][0]["synthesis_path"])
 
     def test_post_message_returns_turn_payload(self) -> None:
         response = self.client.post("/api/chats/chat-1/messages", json={"content": "hello"})

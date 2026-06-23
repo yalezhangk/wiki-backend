@@ -19,6 +19,19 @@
 - `PATCH /api/chats/{chat_id}`
 - `GET /api/chats/{chat_id}/messages`
 - `POST /api/chats/{chat_id}/messages`
+- `POST /api/synthesis`
+
+`POST /api/synthesis` 用于把某条已持久化的助手回答保存为 Wiki Synthesis。前端只提交消息身份，不提交答案正文：
+
+```json
+{
+  "chat_id": "4c992874-bc4a-49d4-85dc-e2c784fb1e61",
+  "assistant_message_id": 42,
+  "title": "可选标题"
+}
+```
+
+保存成功后会写入 `../llm-wiki-agent/wiki/syntheses/*.md`，并更新 `wiki/index.md`、`wiki/log.md` 和该助手消息的 `synthesis_path` / `synthesized_at`。
 
 ## 环境要求
 

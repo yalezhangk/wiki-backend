@@ -11,6 +11,10 @@ class ChatValidationError(ValueError):
     """Raised when chat input is invalid."""
 
 
+class ChatMessageNotFoundError(ChatNotFoundError):
+    """Raised when a message cannot be found in a chat."""
+
+
 class ChatService:
     def __init__(self, storage: MySQLStorage) -> None:
         self._storage = storage
@@ -40,6 +44,21 @@ class ChatService:
     def list_messages(self, chat_id: str) -> list[ChatMessageResponse]:
         self.get_chat(chat_id)
         return self._storage.list_messages(chat_id)
+
+    def get_message(self, chat_id: str, message_id: int) -> ChatMessageResponse:
+        self.get_chat(chat_id)
+        message = self._storage.get_message(chat_id, message_id)
+        if message is None:
+            raise ChatMessageNotFoundError(f"message not found: {message_id}")
+        return message
+
+    def get_previous_user_message(
+        self,
+        chat_id: str,
+        before_message_id: int,
+    ) -> ChatMessageResponse | None:
+        self.get_chat(chat_id)
+        return self._storage.get_previous_user_message(chat_id, before_message_id)
 
     def list_recent_messages(
         self,
@@ -81,6 +100,21 @@ class ChatService:
         last_message_at: datetime | None,
     ) -> ChatResponse:
         return self._storage.update_chat_activity(chat_id, updated_at=updated_at, last_message_at=last_message_at)
+
+    def mark_message_synthesized(
+        self,
+        chat_id: str,
+        message_id: int,
+        synthesis_path: str,
+        synthesized_at: datetime,
+    ) -> ChatMessageResponse | None:
+        self.get_chat(chat_id)
+        return self._storage.mark_message_synthesized(
+            chat_id=chat_id,
+            message_id=message_id,
+            synthesis_path=synthesis_path,
+            synthesized_at=synthesized_at,
+        )
 
     @staticmethod
     def _normalize_optional_text(value: str | None) -> str | None:

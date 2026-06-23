@@ -63,6 +63,8 @@ class MySQLStorage:
                         sources JSON NOT NULL COMMENT '回答引用来源列表（JSON）',
                         relevant_pages JSON NOT NULL COMMENT '查询命中的Wiki页面列表（JSON）',
                         created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
+                        synthesis_path VARCHAR(500) NULL COMMENT '该助手消息保存成的Synthesis相对路径',
+                        synthesized_at DATETIME NULL COMMENT '保存为Synthesis的时间（UTC）',
                         CONSTRAINT fk_chat_messages_chat_id
                             FOREIGN KEY (chat_id) REFERENCES chats(id)
                             ON DELETE CASCADE
@@ -197,7 +199,7 @@ class MySQLStorage:
     def list_messages(self, chat_id: str) -> list[ChatMessageResponse]:
         rows = self._fetch_all(
             """
-            SELECT id, chat_id, role, content, sources, relevant_pages, created_at
+            SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
             FROM chat_messages
             WHERE chat_id = %s
             ORDER BY id ASC
@@ -214,7 +216,7 @@ class MySQLStorage:
     ) -> list[ChatMessageResponse]:
         if before_message_id is None:
             query = """
-                SELECT id, chat_id, role, content, sources, relevant_pages, created_at
+                SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
                 FROM chat_messages
                 WHERE chat_id = %s
                 ORDER BY id DESC
@@ -223,7 +225,7 @@ class MySQLStorage:
             params: tuple[Any, ...] = (chat_id, limit)
         else:
             query = """
-                SELECT id, chat_id, role, content, sources, relevant_pages, created_at
+                SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
                 FROM chat_messages
                 WHERE chat_id = %s AND id < %s
                 ORDER BY id DESC
@@ -278,7 +280,7 @@ class MySQLStorage:
                 message_id = int(cursor.lastrowid)
                 cursor.execute(
                     """
-                    SELECT id, chat_id, role, content, sources, relevant_pages, created_at
+                    SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
                     FROM chat_messages
                     WHERE id = %s
                     """,
@@ -287,6 +289,74 @@ class MySQLStorage:
                 row = cursor.fetchone()
         if row is None:
             raise StorageError("Failed to reload created message.")
+        return self._message_from_row(row)
+
+    def get_message(self, chat_id: str, message_id: int) -> ChatMessageResponse | None:
+        rows = self._fetch_all(
+            """
+            SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
+            FROM chat_messages
+            WHERE chat_id = %s AND id = %s
+            """,
+            (chat_id, message_id),
+        )
+        if not rows:
+            return None
+        return self._message_from_row(rows[0])
+
+    def get_previous_user_message(
+        self,
+        chat_id: str,
+        before_message_id: int,
+    ) -> ChatMessageResponse | None:
+        rows = self._fetch_all(
+            """
+            SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
+            FROM chat_messages
+            WHERE chat_id = %s AND role = 'user' AND id < %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (chat_id, before_message_id),
+        )
+        if not rows:
+            return None
+        return self._message_from_row(rows[0])
+
+    def mark_message_synthesized(
+        self,
+        chat_id: str,
+        message_id: int,
+        synthesis_path: str,
+        synthesized_at: datetime,
+    ) -> ChatMessageResponse | None:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE chat_messages
+                    SET synthesis_path = %s,
+                        synthesized_at = %s
+                    WHERE chat_id = %s
+                      AND id = %s
+                      AND role = 'assistant'
+                      AND synthesis_path IS NULL
+                    """,
+                    (synthesis_path, synthesized_at, chat_id, message_id),
+                )
+                if cursor.rowcount == 0:
+                    return None
+                cursor.execute(
+                    """
+                    SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
+                    FROM chat_messages
+                    WHERE chat_id = %s AND id = %s
+                    """,
+                    (chat_id, message_id),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            raise StorageError("Failed to reload synthesized message.")
         return self._message_from_row(row)
 
     def update_chat_activity(
@@ -354,6 +424,8 @@ class MySQLStorage:
                 "sources": "回答引用来源列表（JSON）",
                 "relevant_pages": "查询命中的Wiki页面列表（JSON）",
                 "created_at": "创建时间（UTC）",
+                "synthesis_path": "该助手消息保存成的Synthesis相对路径",
+                "synthesized_at": "保存为Synthesis的时间（UTC）",
             },
         }
         cursor.execute(
@@ -417,7 +489,24 @@ class MySQLStorage:
             or actual_column_comments["chat_messages"]
             != expected_column_comments["chat_messages"]
             or actual_column_types["chat_messages"].get("created_at") != "datetime"
+            or actual_column_types["chat_messages"].get("synthesized_at") not in {None, "datetime"}
         ):
+            if "synthesis_path" not in actual_column_types["chat_messages"]:
+                cursor.execute(
+                    """
+                    ALTER TABLE chat_messages
+                        ADD COLUMN synthesis_path VARCHAR(500) NULL
+                            COMMENT '该助手消息保存成的Synthesis相对路径'
+                    """
+                )
+            if "synthesized_at" not in actual_column_types["chat_messages"]:
+                cursor.execute(
+                    """
+                    ALTER TABLE chat_messages
+                        ADD COLUMN synthesized_at DATETIME NULL
+                            COMMENT '保存为Synthesis的时间（UTC）'
+                    """
+                )
             cursor.execute(
                 """
                 ALTER TABLE chat_messages
@@ -428,6 +517,8 @@ class MySQLStorage:
                     MODIFY COLUMN sources JSON NOT NULL COMMENT '回答引用来源列表（JSON）',
                     MODIFY COLUMN relevant_pages JSON NOT NULL COMMENT '查询命中的Wiki页面列表（JSON）',
                     MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
+                    MODIFY COLUMN synthesis_path VARCHAR(500) NULL COMMENT '该助手消息保存成的Synthesis相对路径',
+                    MODIFY COLUMN synthesized_at DATETIME NULL COMMENT '保存为Synthesis的时间（UTC）',
                     COMMENT = '聊天消息表'
                 """
             )
@@ -475,6 +566,8 @@ class MySQLStorage:
             sources=self._parse_json_field(row.get("sources")),
             relevant_pages=self._parse_json_field(row.get("relevant_pages")),
             created_at=row["created_at"],
+            synthesis_path=row.get("synthesis_path"),
+            synthesized_at=row.get("synthesized_at"),
         )
 
     @staticmethod

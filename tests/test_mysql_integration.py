@@ -122,7 +122,7 @@ class MySQLIntegrationTests(unittest.TestCase):
         self.assertEqual(created_ids, [second_chat["id"], first_chat["id"]])
 
     def test_tables_and_columns_have_comments(self) -> None:
-        expected_column_counts = {"chats": 6, "chat_messages": 7}
+        expected_column_counts = {"chats": 6, "chat_messages": 9}
         with self.storage.connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -163,6 +163,7 @@ class MySQLIntegrationTests(unittest.TestCase):
             ("chats", "updated_at"),
             ("chats", "last_message_at"),
             ("chat_messages", "created_at"),
+            ("chat_messages", "synthesized_at"),
         }
         with self.storage.connect() as connection:
             with connection.cursor() as cursor:

@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from app.config import settings
 from app.schemas.chat import ChatMessageResponse, ChatResponse
+from app.schemas.ingest import IngestJobResponse, IngestValidation
 
 
 class StorageError(RuntimeError):
@@ -72,6 +73,25 @@ class MySQLStorage:
                     COMMENT='聊天消息表'
                     """
                 )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS ingest_jobs (
+                        id CHAR(36) PRIMARY KEY,
+                        status VARCHAR(32) NOT NULL,
+                        original_filename VARCHAR(255) NOT NULL,
+                        stored_filename VARCHAR(255) NOT NULL,
+                        source_path VARCHAR(500) NOT NULL,
+                        created_pages JSON NOT NULL,
+                        updated_pages JSON NOT NULL,
+                        contradictions JSON NOT NULL,
+                        validation JSON NOT NULL,
+                        error TEXT NULL,
+                        created_at DATETIME NOT NULL,
+                        started_at DATETIME NULL,
+                        finished_at DATETIME NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
                 self._apply_schema_comments(cursor)
                 self._ensure_index(cursor, "chats", "idx_chats_updated_at", "updated_at DESC")
                 self._ensure_index(cursor, "chat_messages", "idx_chat_messages_chat_id_id", "chat_id, id")
@@ -81,6 +101,7 @@ class MySQLStorage:
                     "idx_chat_messages_chat_id_created_at",
                     "chat_id, created_at",
                 )
+                self._ensure_index(cursor, "ingest_jobs", "idx_ingest_jobs_created_at", "created_at DESC")
 
     @contextmanager
     def connect(self) -> Iterator[Any]:
@@ -359,6 +380,118 @@ class MySQLStorage:
             raise StorageError("Failed to reload synthesized message.")
         return self._message_from_row(row)
 
+    def create_ingest_job(
+        self,
+        *,
+        job_id: str,
+        status: str,
+        original_filename: str,
+        stored_filename: str,
+        source_path: str,
+        created_at: datetime,
+    ) -> IngestJobResponse:
+        empty_array = json.dumps([], ensure_ascii=False)
+        empty_validation = json.dumps({"broken_links": [], "unindexed": []}, ensure_ascii=False)
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO ingest_jobs (
+                        id, status, original_filename, stored_filename, source_path,
+                        created_pages, updated_pages, contradictions, validation,
+                        error, created_at, started_at, finished_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NULL, NULL)
+                    """,
+                    (
+                        job_id,
+                        status,
+                        original_filename,
+                        stored_filename,
+                        source_path,
+                        empty_array,
+                        empty_array,
+                        empty_array,
+                        empty_validation,
+                        created_at,
+                    ),
+                )
+                cursor.execute("SELECT * FROM ingest_jobs WHERE id = %s", (job_id,))
+                row = cursor.fetchone()
+        if row is None:
+            raise StorageError("Failed to reload created ingest job.")
+        return self._ingest_job_from_row(row)
+
+    def get_ingest_job(self, job_id: str) -> IngestJobResponse | None:
+        rows = self._fetch_all("SELECT * FROM ingest_jobs WHERE id = %s", (job_id,))
+        if not rows:
+            return None
+        return self._ingest_job_from_row(rows[0])
+
+    def list_ingest_jobs(self, limit: int) -> list[IngestJobResponse]:
+        rows = self._fetch_all(
+            """
+            SELECT *
+            FROM ingest_jobs
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        return [self._ingest_job_from_row(row) for row in rows]
+
+    def mark_ingest_job_running(self, job_id: str, started_at: datetime) -> None:
+        self._execute_update(
+            """
+            UPDATE ingest_jobs
+            SET status = 'running', started_at = %s, error = NULL
+            WHERE id = %s
+            """,
+            (started_at, job_id),
+        )
+
+    def mark_ingest_job_succeeded(
+        self,
+        *,
+        job_id: str,
+        created_pages: list[str],
+        updated_pages: list[str],
+        contradictions: list[str],
+        validation: IngestValidation,
+        finished_at: datetime,
+    ) -> None:
+        self._execute_update(
+            """
+            UPDATE ingest_jobs
+            SET status = 'succeeded',
+                created_pages = %s,
+                updated_pages = %s,
+                contradictions = %s,
+                validation = %s,
+                error = NULL,
+                finished_at = %s
+            WHERE id = %s
+            """,
+            (
+                json.dumps(created_pages, ensure_ascii=False),
+                json.dumps(updated_pages, ensure_ascii=False),
+                json.dumps(contradictions, ensure_ascii=False),
+                validation.model_dump_json(),
+                finished_at,
+                job_id,
+            ),
+        )
+
+    def mark_ingest_job_failed(self, *, job_id: str, error: str, finished_at: datetime) -> None:
+        self._execute_update(
+            """
+            UPDATE ingest_jobs
+            SET status = 'failed', error = %s, finished_at = %s
+            WHERE id = %s
+            """,
+            (error, finished_at, job_id),
+        )
+
     def update_chat_activity(
         self,
         chat_id: str,
@@ -399,6 +532,16 @@ class MySQLStorage:
         except Exception as exc:
             raise StorageError("Storage query failed.") from exc
         return list(rows)
+
+    def _execute_update(self, query: str, params: tuple[Any, ...]) -> None:
+        try:
+            with self.connect() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(query, params)
+        except StorageError:
+            raise
+        except Exception as exc:
+            raise StorageError("Storage update failed.") from exc
 
     @staticmethod
     def _apply_schema_comments(cursor: Any) -> None:
@@ -569,6 +712,35 @@ class MySQLStorage:
             synthesis_path=row.get("synthesis_path"),
             synthesized_at=row.get("synthesized_at"),
         )
+
+    def _ingest_job_from_row(self, row: dict[str, Any]) -> IngestJobResponse:
+        return IngestJobResponse(
+            job_id=str(row["id"]),
+            status=row["status"],
+            original_filename=str(row["original_filename"]),
+            source_path=str(row["source_path"]),
+            created_pages=self._parse_json_field(row.get("created_pages")),
+            updated_pages=self._parse_json_field(row.get("updated_pages")),
+            contradictions=self._parse_json_field(row.get("contradictions")),
+            validation=self._parse_ingest_validation(row.get("validation")),
+            error=row.get("error"),
+            created_at=row["created_at"],
+            started_at=row.get("started_at"),
+            finished_at=row.get("finished_at"),
+        )
+
+    @staticmethod
+    def _parse_ingest_validation(value: Any) -> IngestValidation:
+        if isinstance(value, dict):
+            return IngestValidation.model_validate(value)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return IngestValidation()
+            if isinstance(parsed, dict):
+                return IngestValidation.model_validate(parsed)
+        return IngestValidation()
 
     @staticmethod
     def _import_pymysql() -> Any:

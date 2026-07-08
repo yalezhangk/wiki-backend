@@ -1,6 +1,8 @@
 fastapi==0.116.1
 uvicorn==0.35.0
+markitdown[all]
 pydantic==2.11.7
 pydantic-settings==2.10.1
 litellm==1.82.6
 PyMySQL==1.1.1
+python-multipart==0.0.20

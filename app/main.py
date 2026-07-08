@@ -9,12 +9,14 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chats import router as chats_router
+from app.api.ingest import router as ingest_router
 from app.api.synthesis import router as synthesis_router
 from app.config import settings
 from app.logging_config import configure_logging
 from app.schemas.query import QueryRequest, QueryResponse
 from app.services.chat_service import ChatService
 from app.services.chat_turn_service import ChatTurnService
+from app.services.ingest_service import IngestService
 from app.services.query_service import QueryService, QueryServiceError
 from app.services.synthesis_service import SynthesisService
 from app.storage.mysql import storage
@@ -28,6 +30,7 @@ def create_app(
     chat_service: ChatService | None = None,
     chat_turn_service: ChatTurnService | None = None,
     query_service: QueryService | None = None,
+    ingest_service: IngestService | None = None,
     synthesis_service: SynthesisService | None = None,
     initialize_storage: bool = True,
 ) -> FastAPI:
@@ -39,6 +42,11 @@ def create_app(
             app.state.chat_service = ChatService(storage)
         if not hasattr(app.state, "query_service"):
             app.state.query_service = QueryService(Path(settings.llm_wiki_repo_path))
+        if not hasattr(app.state, "ingest_service"):
+            app.state.ingest_service = IngestService(
+                storage=storage,
+                agent_root=Path(settings.llm_wiki_repo_path),
+            )
         if not hasattr(app.state, "chat_turn_service"):
             app.state.chat_turn_service = ChatTurnService(
                 chat_service=app.state.chat_service,
@@ -85,6 +93,8 @@ def create_app(
         app.state.chat_service = chat_service
     if query_service is not None:
         app.state.query_service = query_service
+    if ingest_service is not None:
+        app.state.ingest_service = ingest_service
     if chat_turn_service is not None:
         app.state.chat_turn_service = chat_turn_service
     if synthesis_service is not None:
@@ -133,6 +143,7 @@ def create_app(
         )
 
     app.include_router(chats_router)
+    app.include_router(ingest_router)
     app.include_router(synthesis_router)
     return app
 

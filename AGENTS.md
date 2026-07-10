@@ -156,14 +156,10 @@ git pull
 
 # 创建虚拟环境.venv
 uv venv --python 3.12
-# 激活并进入虚拟环境
-source .venv/bin/activate
 # 安装依赖
 uv pip install -r requirements.txt
 .venv/bin/python -m unittest discover -s tests
 # 启动项目
-uv run python -m app.main
-
 .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8081
 ```
 
@@ -309,27 +305,24 @@ data_path = BASE_DIR / "data" / "input.txt"
 
 ---
 
-### 8.2 配置路径通过环境变量传入
+### 8.2 配置通过环境变量或 `.env` 传入
 
-推荐：
+`wiki-backend` 的配置项定义在 `app/config.py`，真实机器配置写在项目根目录 `.env` 中。不要为了适配某台机器去改 `config.py`。
 
-```python
-import os
-from pathlib import Path
-
-DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
-MODEL_DIR = Path(os.getenv("MODEL_DIR", "./models")).resolve()
-```
-
-`.env.example` 示例：
+当前项目实际读取的 `.env` 示例：
 
 ```env
-DATA_DIR=./data
-MODEL_DIR=./models
-OLLAMA_BASE_URL=http://127.0.0.1:11434
+WIKI_AGENT_REPO_PATH=../llm-wiki-agent
+WIKI_BACKEND_MYSQL_HOST=127.0.0.1
+WIKI_BACKEND_MYSQL_PORT=3306
+WIKI_BACKEND_MYSQL_USER=wiki_backend_app
+WIKI_BACKEND_MYSQL_PASSWORD=replace-with-real-password
+WIKI_BACKEND_MYSQL_DATABASE=wiki_backend
+WIKI_BACKEND_DEFAULT_CHAT_TITLE=新对话
+WIKI_BACKEND_CHAT_HISTORY_LIMIT=6
 ```
 
-DGX Spark 上的真实 `.env` 单独维护，不提交 Git。
+DGX Spark 上的真实 `.env` 单独维护，不提交 Git。`WIKI_AGENT_REPO_PATH` 应使用 Linux 相对路径或绝对路径，不能使用 Windows 反斜杠路径。
 
 ---
 
@@ -451,7 +444,7 @@ git config --global --get core.eol
 
 Linux shell 脚本必须具备执行权限。
 
-例如：
+如果后续新增脚本，例如：
 
 ```bash
 chmod +x scripts/deploy.sh
@@ -562,6 +555,26 @@ WIKI_BACKEND_CHAT_HISTORY_LIMIT=6
 
 `WIKI_AGENT_REPO_PATH` 在 DGX 上应使用 Linux 相对路径或绝对路径，不能使用 Windows 路径。
 
+MySQL 需要提前创建数据库和用户。如果 `.env` 中 `WIKI_BACKEND_MYSQL_HOST=127.0.0.1`，建议同时授权 `localhost` 和 `127.0.0.1`：
+
+```sql
+CREATE DATABASE wiki_backend
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+
+CREATE USER 'wiki_backend_app'@'localhost'
+  IDENTIFIED BY 'replace-with-a-strong-password';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES
+  ON wiki_backend.* TO 'wiki_backend_app'@'localhost';
+
+CREATE USER 'wiki_backend_app'@'127.0.0.1'
+  IDENTIFIED BY 'replace-with-a-strong-password';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES
+  ON wiki_backend.* TO 'wiki_backend_app'@'127.0.0.1';
+
+FLUSH PRIVILEGES;
+```
+
 ---
 
 ### 12.3 服务启动与健康检查
@@ -583,6 +596,7 @@ tmux new-session -d -s wiki-backend \
 
 ```bash
 curl --fail --silent --show-error http://127.0.0.1:8081/health
+curl --fail --silent --show-error http://127.0.0.1:8081/api/chats
 ```
 
 Windows 浏览器访问：
@@ -590,6 +604,8 @@ Windows 浏览器访问：
 ```text
 http://192.168.x.x:8081/health
 ```
+
+`/health` 只验证 FastAPI 进程可用；`/api/chats` 成功才说明 MySQL 配置基本可用。若 Quartz 前端通过 `http://192.168.x.x:8080` 访问后端，需要同步更新 `app/main.py` 的 CORS `allow_origins`。
 
 ---
 
@@ -616,12 +632,13 @@ project/
 ├─ data/
 ├─ scripts/
 ├─ tests/
-├─ pyproject.toml
 ├─ requirements.txt
 ├─ .env.example
 ├─ .gitignore
 └─ README.md
 ```
+
+当前 `wiki-backend` 使用 `requirements.txt` 作为依赖入口，尚未使用 `pyproject.toml` / `uv.lock`。后续如果迁移到 `pyproject.toml`，需要同步更新 README、AGENTS 和部署命令。
 
 推荐使用：
 
@@ -743,11 +760,14 @@ ssh $server "cd $project && git pull && uv venv && uv pip install -r requirement
 ssh $server "tmux has-session -t wiki-backend 2>/dev/null && tmux kill-session -t wiki-backend || true"
 ssh $server "cd $project && tmux new-session -d -s wiki-backend '.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8081'"
 ssh $server "curl --fail --silent --show-error http://127.0.0.1:8081/health"
+ssh $server "curl --fail --silent --show-error http://127.0.0.1:8081/api/chats"
 ```
 
 ---
 
-### 16.2 DGX 端 scripts/deploy.sh
+### 16.2 DGX 端可选 scripts/deploy.sh
+
+当前仓库尚未提交 `scripts/deploy.sh`。如果后续需要 DGX 本机部署脚本，可按下面模板新增：
 
 ```bash
 #!/usr/bin/env bash
@@ -768,6 +788,7 @@ tmux new-session -d -s wiki-backend \
   'cd ~/projects/wiki_backend && .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8081'
 
 curl --fail --silent --show-error http://127.0.0.1:8081/health
+curl --fail --silent --show-error http://127.0.0.1:8081/api/chats
 ```
 
 赋权：
@@ -792,7 +813,7 @@ Windows Chrome
 → Open WebUI on DGX Spark
 ```
 
-后端服务调用 Ollama 时，优先通过环境变量配置。当前 `wiki-backend` 原生运行在 DGX 宿主机上，默认使用：
+当前 `wiki-backend` 不直接读取 `OLLAMA_BASE_URL`；LLM 调用由 `llm-wiki-agent` 的配置负责。如果后续需要在相关模型配置中指定 DGX 宿主机 Ollama，原生运行时通常使用：
 
 ```env
 OLLAMA_BASE_URL=http://127.0.0.1:11434
@@ -922,6 +943,7 @@ uv --version
 .venv/bin/python --version
 .venv/bin/python -m unittest discover -s tests
 curl --fail --silent --show-error http://127.0.0.1:8081/health
+curl --fail --silent --show-error http://127.0.0.1:8081/api/chats
 ```
 
 常见原因：

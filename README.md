@@ -67,7 +67,7 @@ MySQL 只保存 chat 元数据和消息，不保存 wiki 正文。
 参考 `.env.example`：
 
 ```text
-WIKI_AGENT_REPO_PATH=..\llm-wiki-agent
+WIKI_AGENT_REPO_PATH=../llm-wiki-agent
 WIKI_BACKEND_MYSQL_HOST=127.0.0.1
 WIKI_BACKEND_MYSQL_PORT=3306
 WIKI_BACKEND_MYSQL_USER=wiki_backend_app
@@ -81,14 +81,18 @@ WIKI_BACKEND_CHAT_HISTORY_LIMIT=6
 
 所有 Python 命令都应使用项目内虚拟环境。
 
-```powershell
-.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8081
-```
-
-也可以直接运行：
+Windows：
 
 ```powershell
 .venv\Scripts\python.exe -m app.main
+```
+
+Ubuntu / DGX Spark：
+
+```bash
+uv venv --python 3.12
+uv pip install -r requirements.txt
+.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8081
 ```
 
 ## 测试

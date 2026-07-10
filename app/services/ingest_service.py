@@ -112,7 +112,7 @@ class IngestService:
         self._index_file = self._wiki_dir / "index.md"
         self._overview_file = self._wiki_dir / "overview.md"
         self._log_file = self._wiki_dir / "log.md"
-        self._call_llm_main = self._load_llm_caller()
+        self._call_llm_main: Callable[[str, int | None], str] | None = None
         self._queue: Queue[str] = Queue()
         self._worker: threading.Thread | None = None
         if start_worker:
@@ -447,15 +447,22 @@ Important:
             return str(debug_path)
 
     def _call_llm_with_retry(self, prompt: str) -> str:
+        call_llm_main = self._get_llm_caller()
         for attempt in range(2):
             try:
-                return self._call_llm_main(prompt, max_tokens=8192)
+                return call_llm_main(prompt, max_tokens=8192)
             except Exception:
                 if attempt == 1:
                     raise
                 LOGGER.warning("LLM ingest generation failed; retrying once", exc_info=True)
                 time.sleep(1)
         raise RuntimeError("unreachable LLM retry state")
+
+    def _get_llm_caller(self) -> Callable[[str, int | None], str]:
+        if self._call_llm_main is None:
+            self._call_llm_main = self._load_llm_caller()
+        assert self._call_llm_main is not None
+        return self._call_llm_main
 
     def _load_llm_caller(self) -> Callable[[str, int | None], str]:
         if not self._agent_root.exists():

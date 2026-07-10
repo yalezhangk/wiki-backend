@@ -36,8 +36,15 @@ def create_app(
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.storage_ready = False
         if app.state.initialize_storage:
-            storage.initialize()
+            try:
+                storage.initialize()
+                app.state.storage_ready = True
+            except Exception:
+                LOGGER.exception("wiki-backend started without initialized MySQL storage")
+        else:
+            app.state.storage_ready = True
         if not hasattr(app.state, "chat_service"):
             app.state.chat_service = ChatService(storage)
         if not hasattr(app.state, "query_service"):
@@ -158,4 +165,4 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8081, reload=True)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8081, reload=True)

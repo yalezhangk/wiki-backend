@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import DirectoryPath, Field
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
@@ -14,8 +16,8 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "wiki-backend"
-    llm_wiki_repo_path: DirectoryPath = Field(
-        default=Path("..\\llm-wiki-agent").resolve(),
+    llm_wiki_repo_path: Path = Field(
+        default=(PROJECT_ROOT.parent / "llm-wiki-agent").resolve(),
         validation_alias="WIKI_AGENT_REPO_PATH",
     )
     mysql_host: str = Field(

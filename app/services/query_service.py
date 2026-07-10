@@ -77,7 +77,8 @@ class QueryService:
         self._index_file = self._wiki_dir / "index.md"
         self._schema_file = self._agent_root / "AGENTS.md"
         self._graph_json = self._agent_root / "graph" / "graph.json"
-        self._call_llm_fast, self._call_llm_main = self._load_llm_callers()
+        self._call_llm_fast: Callable[[str, int | None], str] | None = None
+        self._call_llm_main: Callable[[str, int | None], str] | None = None
 
     def run(self, question: str) -> QueryResult:
         return self._run(question=question, history_messages=[])
@@ -103,12 +104,13 @@ class QueryService:
             pages_context=pages_context,
             conversation_history=self._build_conversation_history(history_messages),
         )
+        _, call_llm_main = self._get_llm_callers()
 
         LOGGER.info("Running wiki query question=%r relevant_pages=%d", normalized_question, len(relevant_pages))
 
         try:
             answer = self._call_llm_with_retry(
-                self._call_llm_main,
+                call_llm_main,
                 prompt,
                 max_tokens=4096,
                 operation="answer generation",
@@ -132,6 +134,7 @@ class QueryService:
             return relevant_pages
 
         LOGGER.info("Falling back to model-based page selection")
+        call_llm_fast, _ = self._get_llm_callers()
         prompt = (
             "Given this wiki index:\n\n"
             f"{index_content}\n\n"
@@ -141,7 +144,7 @@ class QueryService:
         )
         try:
             raw = self._call_llm_with_retry(
-                self._call_llm_fast,
+                call_llm_fast,
                 prompt,
                 max_tokens=512,
                 operation="page selection",
@@ -249,6 +252,13 @@ Requirements:
         if not isinstance(parsed, list):
             return None
         return parsed
+
+    def _get_llm_callers(self) -> tuple[Callable[[str, int | None], str], Callable[[str, int | None], str]]:
+        if self._call_llm_fast is None or self._call_llm_main is None:
+            self._call_llm_fast, self._call_llm_main = self._load_llm_callers()
+        assert self._call_llm_fast is not None
+        assert self._call_llm_main is not None
+        return self._call_llm_fast, self._call_llm_main
 
     def _load_llm_callers(self) -> tuple[Callable[[str, int | None], str], Callable[[str, int | None], str]]:
         if not self._agent_root.exists():

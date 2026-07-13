@@ -161,6 +161,19 @@ class ChatsApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.json()["detail"], "llm failed")
 
+    def test_post_message_logs_502_query_failure(self) -> None:
+        self.chat_turn_service.should_fail = True
+
+        with self.assertLogs("uvicorn.error", level="ERROR") as logs:
+            response = self.client.post("/api/chats/chat-1/messages", json={"content": "hello"})
+
+        self.assertEqual(response.status_code, 502)
+        self.assertIn(
+            "HTTP 502 for POST /api/chats/chat-1/messages: llm failed",
+            "\n".join(logs.output),
+        )
+        self.assertIsNotNone(logs.records[0].exc_info)
+
 
 if __name__ == "__main__":
     unittest.main()

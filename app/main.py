@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.chats import router as chats_router
 from app.api.ingest import router as ingest_router
@@ -23,6 +24,7 @@ from app.storage.mysql import storage
 
 configure_logging()
 LOGGER = logging.getLogger(__name__)
+SERVER_LOGGER = logging.getLogger("uvicorn.error")
 
 
 def create_app(
@@ -90,11 +92,29 @@ def create_app(
         allow_origins=[
             "http://127.0.0.1:8080",
             "http://localhost:8080",
+            "http://192.168.8.8:8080",
         ],
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.exception_handler(HTTPException)
+    async def log_http_exception(request: Request, exc: HTTPException) -> JSONResponse:
+        if exc.status_code >= 500:
+            SERVER_LOGGER.error(
+                "HTTP %s for %s %s: %s",
+                exc.status_code,
+                request.method,
+                request.url.path,
+                exc.detail,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=exc.headers,
+        )
 
     if chat_service is not None:
         app.state.chat_service = chat_service

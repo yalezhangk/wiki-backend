@@ -595,17 +595,17 @@ tmux new-session -d -s wiki-backend \
 验证：
 
 ```bash
-curl --fail --silent --show-error http://127.0.0.1:8081/health
+curl --fail --silent --show-error http://127.0.0.1:8081/api/health
 curl --fail --silent --show-error http://127.0.0.1:8081/api/chats
 ```
 
 Windows 浏览器访问：
 
 ```text
-http://192.168.x.x:8081/health
+http://192.168.x.x:8081/api/health
 ```
 
-`/health` 只验证 FastAPI 进程可用；`/api/chats` 成功才说明 MySQL 配置基本可用。若 Quartz 前端通过 `http://192.168.x.x:8080` 访问后端，需要同步更新 `app/main.py` 的 CORS `allow_origins`。
+`/api/health` 只验证 FastAPI 进程可用；`/api/chats` 成功才说明 MySQL 配置基本可用。若 Quartz 前端通过 `http://192.168.x.x:8080` 访问后端，需要同步更新 `app/main.py` 的 CORS `allow_origins`。
 
 ---
 
@@ -618,7 +618,7 @@ http://192.168.x.x:8081/health
 - ARM64 基础镜像是否可用。
 - `markitdown[all]`、`litellm`、`PyMySQL` 等依赖是否能在 ARM64 镜像内安装。
 - 容器内 `.env`、MySQL、Ollama、`llm-wiki-agent` 路径是否可达。
-- 启动后 `/health`、`/api/query`、chat、ingest、synthesis 端到端路径是否正常。
+- 启动后 `/api/health`、`/api/query`、chat、ingest、synthesis 端到端路径是否正常。
 
 ---
 
@@ -759,7 +759,7 @@ Write-Host "Deploying on DGX Spark..."
 ssh $server "cd $project && git pull && uv venv && uv pip install -r requirements.txt && .venv/bin/python -m unittest discover -s tests"
 ssh $server "tmux has-session -t wiki-backend 2>/dev/null && tmux kill-session -t wiki-backend || true"
 ssh $server "cd $project && tmux new-session -d -s wiki-backend '.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8081'"
-ssh $server "curl --fail --silent --show-error http://127.0.0.1:8081/health"
+ssh $server "curl --fail --silent --show-error http://127.0.0.1:8081/api/health"
 ssh $server "curl --fail --silent --show-error http://127.0.0.1:8081/api/chats"
 ```
 
@@ -787,7 +787,7 @@ fi
 tmux new-session -d -s wiki-backend \
   'cd ~/projects/wiki_backend && .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8081'
 
-curl --fail --silent --show-error http://127.0.0.1:8081/health
+curl --fail --silent --show-error http://127.0.0.1:8081/api/health
 curl --fail --silent --show-error http://127.0.0.1:8081/api/chats
 ```
 
@@ -942,7 +942,7 @@ uname -m
 uv --version
 .venv/bin/python --version
 .venv/bin/python -m unittest discover -s tests
-curl --fail --silent --show-error http://127.0.0.1:8081/health
+curl --fail --silent --show-error http://127.0.0.1:8081/api/health
 curl --fail --silent --show-error http://127.0.0.1:8081/api/chats
 ```
 
@@ -1005,7 +1005,7 @@ ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 5. DGX Spark 上已通过 `uv venv` 和 `uv pip install -r requirements.txt` 安装依赖。
 6. DGX Spark 上 `.venv/bin/python -m unittest discover -s tests` 通过。
 7. DGX Spark 上 `.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8081` 能成功启动。
-8. DGX Spark 上 `/health` 返回成功。
+8. DGX Spark 上 `/api/health` 返回成功。
 9. DGX Spark 上日志无明显错误。
 10. Windows 浏览器能访问 DGX Spark 上的服务。
 11. 所有脚本在 Linux Ubuntu ARM64 上可执行。

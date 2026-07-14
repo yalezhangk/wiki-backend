@@ -12,7 +12,7 @@
 
 ## API
 
-- `GET /health`
+- `GET /api/health`
 - `POST /api/query`
 - `GET /api/chats`
 - `POST /api/chats`
@@ -112,10 +112,10 @@ uv pip install -r requirements.txt
 .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8081
 ```
 
-`/health` 只表示 FastAPI 进程已启动。数据库是否配置正确，应再访问依赖 MySQL 的接口验证：
+`/api/health` 只表示 FastAPI 进程已启动。数据库是否配置正确，应再访问依赖 MySQL 的接口验证：
 
 ```bash
-curl --fail --silent --show-error http://127.0.0.1:8081/health
+curl --fail --silent --show-error http://127.0.0.1:8081/api/health
 curl --fail --silent --show-error http://127.0.0.1:8081/api/chats
 ```
 

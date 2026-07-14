@@ -282,7 +282,7 @@ wiki-backend/
    - `POST /api/chats/{chat_id}/messages`
    - `PATCH /api/chats/{chat_id}`
 2. 在 `app/main.py` 中注册 router。
-3. 保留 `GET /health`。
+3. 保留 `GET /api/health`。
 4. 如保留 `/api/query`，可放在单独 router 或留在 `main.py`，但不与 chat 业务混写。
 5. 错误映射：
    - `ChatNotFoundError` -> `404`

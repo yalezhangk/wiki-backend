@@ -40,10 +40,12 @@ class StartupDependencyTests(unittest.TestCase):
     def test_health_survives_storage_initialization_failure(self) -> None:
         with patch("app.main.storage.initialize", side_effect=RuntimeError("mysql down")):
             with TestClient(create_app()) as client:
-                response = client.get("/health")
+                response = client.get("/api/health")
+                legacy_response = client.get("/health")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok"})
+        self.assertEqual(legacy_response.status_code, 404)
 
 
 if __name__ == "__main__":

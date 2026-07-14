@@ -128,7 +128,7 @@ def create_app(
         app.state.synthesis_service = synthesis_service
 
     @app.get(
-        "/health",
+        "/api/health",
         tags=["health"],
         summary="检查服务状态",
         description="用于确认 FastAPI 服务进程是否正常启动。该接口不访问 LLM，也不依赖聊天业务。",

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 import re
-import sys
 import time
 from pathlib import Path
 from typing import Callable, Sequence
 
+from app.llm_config import call_llm_fast, call_llm_main
+from app.prompts import load_prompt, render_prompt
 from app.schemas.chat import ChatMessageResponse
 from app.schemas.query import QueryResult
 
@@ -75,7 +75,6 @@ class QueryService:
         self._agent_root = agent_root.resolve()
         self._wiki_dir = self._agent_root / "wiki"
         self._index_file = self._wiki_dir / "index.md"
-        self._schema_file = self._agent_root / "AGENTS.md"
         self._graph_json = self._agent_root / "graph" / "graph.json"
         self._call_llm_fast: Callable[[str, int | None], str] | None = None
         self._call_llm_main: Callable[[str, int | None], str] | None = None
@@ -97,10 +96,9 @@ class QueryService:
 
         relevant_pages = self._select_relevant_pages(normalized_question, index_content)
         pages_context = self._build_pages_context(relevant_pages, index_content)
-        schema = read_file(self._schema_file)
         prompt = self._build_answer_prompt(
             question=normalized_question,
-            schema=schema,
+            schema=load_prompt("agent_instructions.md"),
             pages_context=pages_context,
             conversation_history=self._build_conversation_history(history_messages),
         )
@@ -116,11 +114,11 @@ class QueryService:
                 operation="answer generation",
             )
         except Exception as exc:
-            raise QueryServiceError("Failed to generate query answer via llm-wiki-agent LLM config.") from exc
+            raise QueryServiceError("Failed to generate query answer via backend LLM config.") from exc
 
         normalized_answer = answer.strip()
         if not normalized_answer:
-            raise QueryServiceError("llm-wiki-agent returned an empty answer")
+            raise QueryServiceError("LLM returned an empty answer")
 
         return QueryResult(
             answer=normalized_answer,
@@ -213,31 +211,13 @@ class QueryService:
         pages_context: str,
         conversation_history: str,
     ) -> str:
-        return f"""You are querying an LLM Wiki to answer a question. Use the wiki pages below to synthesize a thorough answer.
-
-Schema:
-{schema}
-
-Conversation history:
-{conversation_history}
-
-Relevant wiki pages:
-{pages_context}
-
-Current user question:
-{question}
-
-Requirements:
-- Use the conversation history only to resolve context, references, and ellipsis.
-- The final answer must still be grounded in the wiki pages above.
-- Start with the answer itself. Do not repeat, quote, or paraphrase the current user question.
-- Do not use the current user question as the answer title or as a heading.
-- Cite sources using [[PageName]] wikilink syntax.
-- Write a well-structured markdown answer. Use headers and bullets only when they improve readability.
-- Preserve Markdown block structure: headings must be on their own line, paragraphs must be separated by a blank line, and each bullet must be on its own line.
-- Never collapse headings, paragraphs, or bullet lists into a single line.
-- At the end, add a ## Sources section listing the pages you drew from.
-"""
+        return render_prompt(
+            "query.md",
+            question=question,
+            schema=schema,
+            pages_context=pages_context,
+            conversation_history=conversation_history,
+        )
 
     @staticmethod
     def _parse_json_array(raw: str) -> list[str] | None:
@@ -261,21 +241,4 @@ Requirements:
         return self._call_llm_fast, self._call_llm_main
 
     def _load_llm_callers(self) -> tuple[Callable[[str, int | None], str], Callable[[str, int | None], str]]:
-        if not self._agent_root.exists():
-            raise QueryServiceError(f"llm-wiki-agent repo not found: {self._agent_root}")
-
-        agent_root_text = str(self._agent_root)
-        if agent_root_text not in sys.path:
-            sys.path.insert(0, agent_root_text)
-
-        try:
-            llm_config = importlib.import_module("tools.llm_config")
-        except ModuleNotFoundError as exc:
-            raise QueryServiceError("Unable to import llm-wiki-agent tools.llm_config.") from exc
-
-        call_llm_fast = getattr(llm_config, "call_llm_fast", None)
-        call_llm_main = getattr(llm_config, "call_llm_main", None)
-        if not callable(call_llm_fast) or not callable(call_llm_main):
-            raise QueryServiceError("llm-wiki-agent tools.llm_config is missing required callables.")
-
         return call_llm_fast, call_llm_main

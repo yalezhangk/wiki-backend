@@ -4,11 +4,13 @@
 
 ## 职责边界
 
-- `llm-wiki-agent`：知识库 ingest、query、lint、health、graph 等核心工作流及 Wiki 文件。
-- `wiki-backend`：HTTP API、聊天编排、任务状态、数据库持久化和 synthesis 写入协调。
+- `llm-wiki-agent`：供 Codex、Claude Code 等 Coding Agent 直接运行的知识库 Agent/Skill，并保存 Wiki 文件。
+- `wiki-backend`：独立实现 HTTP query、ingest、聊天编排、任务状态、数据库持久化和 synthesis 写入。
 - `quartz`：读取 Wiki Markdown，构建静态 UI，并通过同源 `/api` 调用本服务。
 
 `wiki-backend` 不负责直接提供 Quartz 静态页面，也不负责在 ingest 完成后自动重建 `quartz/public/`。当前流程中，Wiki 文件变化后仍需单独执行 Quartz 构建。
+
+后端只共享 `llm-wiki-agent` 的 `wiki/`、`raw/` 和 `graph/` 数据，不导入其 Python 源码。LLM 调用配置位于 `app/llm_config.py`，query 和 ingest 使用的 Agent Prompt 固化在 `app/prompts/agent_instructions.md`。该 Prompt 只同步自 `llm-wiki-agent/AGENTS.md`，不使用 `CLAUDE.md`。
 
 ## 当前部署拓扑
 
@@ -66,7 +68,7 @@ http://127.0.0.1:8081/docs
 - Python 3.10+
 - 项目内虚拟环境 `.venv`
 - MySQL 8+，推荐 InnoDB 和 `utf8mb4`
-- `llm-wiki-agent` 与本项目在 DGX 上可通过 `WIKI_AGENT_REPO_PATH` 互相定位
+- `WIKI_AGENT_REPO_PATH` 用于定位共享的 `wiki/`、`raw/` 和 `graph/` 数据目录，不用于导入 agent 源码
 - 最终运行环境：NVIDIA DGX Spark，Ubuntu ARM64
 
 当前优先使用 DGX 宿主机原生 `uv + .venv`，不以 Docker 作为默认部署路径。
@@ -84,9 +86,15 @@ WIKI_BACKEND_MYSQL_PASSWORD=replace-with-a-strong-password
 WIKI_BACKEND_MYSQL_DATABASE=wiki_backend
 WIKI_BACKEND_DEFAULT_CHAT_TITLE=新对话
 WIKI_BACKEND_CHAT_HISTORY_LIMIT=6
+WIKI_BACKEND_LLM_FAST_PROVIDER=deepseek
+WIKI_BACKEND_LLM_FAST_MODEL=deepseek-v4-flash
+WIKI_BACKEND_LLM_MAIN_PROVIDER=deepseek
+WIKI_BACKEND_LLM_MAIN_MODEL=deepseek-v4-pro
+WIKI_BACKEND_LLM_API_KEY=
+WIKI_BACKEND_LLM_API_BASE=
 ```
 
-真实 `.env` 不提交 Git。DGX 上使用 Linux 路径，不要写入 Windows 反斜杠路径。
+真实 `.env` 不提交 Git。DGX 上使用 Linux 路径，不要写入 Windows 反斜杠路径。模型密钥只写入服务器 `.env`；不要把 `llm-wiki-agent/tools/llm_config.py` 中的本地配置或密钥复制到本项目。
 
 ## MySQL 初始化
 

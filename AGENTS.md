@@ -8,7 +8,7 @@
 
 - 对外提供 health、query、chats、ingest 和 synthesis API。
 - 使用 MySQL 保存聊天、消息和 ingest job 元数据。
-- 调用相邻 `llm-wiki-agent` 的能力并在预期业务流程中读写其 Wiki 文件。
+- 独立实现 HTTP query、ingest 和 synthesis，并在预期业务流程中读写相邻 `llm-wiki-agent` 的 Wiki 数据。
 - 由 DGX Nginx 通过同源 `/api/` 提供给 Quartz UI。
 
 它不负责提供 Quartz 静态页面，也不负责自动重建 `quartz/public/`。
@@ -42,6 +42,8 @@ ECS Nginx :8080
 - `app/services/`：业务编排，不把 HTTP 细节下沉到服务层。
 - `app/storage/mysql.py`：MySQL 持久化和初始化。
 - `app/config.py`：从 `.env` 读取配置。
+- `app/llm_config.py`：后端自有 LiteLLM 调用配置，不依赖 agent 源码。
+- `app/prompts/`：后端运行时 Prompt；`agent_instructions.md` 只同步自 `llm-wiki-agent/AGENTS.md`。
 - `app/logging_config.py`：应用和 Uvicorn 日志配置。
 - `tests/`：API、服务、启动、日志和 MySQL 集成测试。
 
@@ -63,7 +65,8 @@ ECS Nginx :8080
 - 保持 API 路由层、服务层和存储层的现有职责分离。
 - API 请求和响应结构变化必须同步更新 Pydantic schema、路由文档、测试和 README。
 - 数据库结构变化必须考虑已有数据、启动初始化、索引和回滚风险。
-- 不把 `llm-wiki-agent` 内部实现复制进本项目。
+- 不动态导入或执行 `llm-wiki-agent` 的 Python 源码。
+- `app/prompts/agent_instructions.md` 只允许同步 `llm-wiki-agent/AGENTS.md`；禁止混入 `CLAUDE.md`。
 - 未经用户明确授权，不修改 `llm-wiki-agent` 源码。ingest/synthesis 运行时对其 `wiki/` 的预期业务写入除外。
 - 不为未来 Docker 化提前增加无需求的容器配置；当前默认是 DGX 宿主机 `uv + .venv`。
 
@@ -80,7 +83,15 @@ WIKI_BACKEND_MYSQL_PASSWORD=replace-with-a-strong-password
 WIKI_BACKEND_MYSQL_DATABASE=wiki_backend
 WIKI_BACKEND_DEFAULT_CHAT_TITLE=新对话
 WIKI_BACKEND_CHAT_HISTORY_LIMIT=6
+WIKI_BACKEND_LLM_FAST_PROVIDER=deepseek
+WIKI_BACKEND_LLM_FAST_MODEL=deepseek-v4-flash
+WIKI_BACKEND_LLM_MAIN_PROVIDER=deepseek
+WIKI_BACKEND_LLM_MAIN_MODEL=deepseek-v4-pro
+WIKI_BACKEND_LLM_API_KEY=
+WIKI_BACKEND_LLM_API_BASE=
 ```
+
+`WIKI_AGENT_REPO_PATH` 只表示共享知识库数据所在的 agent 仓库根目录，不允许再用于 `sys.path` 或动态 Python 导入。
 
 真实 `.env` 不提交。新增配置时必须：
 

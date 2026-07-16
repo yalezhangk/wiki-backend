@@ -23,7 +23,7 @@ class StartupDependencyTests(unittest.TestCase):
             (PROJECT_ROOT.parent / "llm-wiki-agent").resolve(),
         )
 
-    def test_services_do_not_import_agent_repo_during_construction(self) -> None:
+    def test_services_do_not_require_agent_source_code_during_construction(self) -> None:
         missing_root = Path(tempfile.gettempdir()) / "missing-llm-wiki-agent-for-startup-test"
 
         query_service = QueryService(missing_root)
@@ -36,6 +36,22 @@ class StartupDependencyTests(unittest.TestCase):
         self.assertIsNone(query_service._call_llm_fast)
         self.assertIsNone(query_service._call_llm_main)
         self.assertIsNone(ingest_service._call_llm_main)
+
+    def test_services_load_backend_owned_llm_callers(self) -> None:
+        missing_root = Path(tempfile.gettempdir()) / "missing-llm-wiki-agent-for-llm-test"
+        query_service = QueryService(missing_root)
+        ingest_service = IngestService(
+            storage=object(),  # type: ignore[arg-type]
+            agent_root=missing_root,
+            start_worker=False,
+        )
+
+        query_fast, query_main = query_service._load_llm_callers()
+        ingest_main = ingest_service._load_llm_caller()
+
+        self.assertEqual(query_fast.__module__, "app.llm_config")
+        self.assertEqual(query_main.__module__, "app.llm_config")
+        self.assertEqual(ingest_main.__module__, "app.llm_config")
 
     def test_health_survives_storage_initialization_failure(self) -> None:
         with patch("app.main.storage.initialize", side_effect=RuntimeError("mysql down")):

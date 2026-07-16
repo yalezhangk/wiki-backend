@@ -72,7 +72,6 @@ class IngestServiceTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.agent_root = Path(self.temp_dir.name)
         (self.agent_root / "wiki").mkdir()
-        (self.agent_root / "CLAUDE.md").write_text("schema", encoding="utf-8")
         self.storage = FakeStorage()
         with patch.object(IngestService, "_load_llm_caller", return_value=lambda prompt, max_tokens=None: "{}"):
             self.service = IngestService(
@@ -146,8 +145,9 @@ class IngestServiceTests(unittest.TestCase):
 
         prompt = self.service._build_prompt(source=source, source_content="# Report")
 
+        self.assertIn("LLM Wiki Agent — Schema & Workflow Instructions", prompt)
         self.assertIn('"overview_update": null', prompt)
-        self.assertIn('Always set "overview_update" to null', prompt)
+        self.assertIn('Always set `"overview_update"` to `null`', prompt)
 
     def test_build_wiki_context_clips_large_overview(self) -> None:
         overview_path = self.agent_root / "wiki" / "overview.md"

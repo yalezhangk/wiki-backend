@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 import re
-import sys
 import threading
 import time
 from datetime import date, datetime
@@ -16,6 +14,8 @@ from uuid import uuid4
 
 from fastapi import UploadFile
 
+from app.llm_config import call_llm_main
+from app.prompts import load_prompt, render_prompt
 from app.schemas.ingest import IngestJobResponse, IngestLLMResult, IngestValidation
 
 LOGGER = logging.getLogger(__name__)
@@ -108,7 +108,6 @@ class IngestService:
         self._agent_root = agent_root.resolve()
         self._wiki_dir = self._agent_root / "wiki"
         self._upload_dir = self._agent_root / "raw" / "uploads"
-        self._schema_file = self._agent_root / "CLAUDE.md"
         self._index_file = self._wiki_dir / "index.md"
         self._overview_file = self._wiki_dir / "overview.md"
         self._log_file = self._wiki_dir / "log.md"
@@ -293,43 +292,14 @@ class IngestService:
 
     def _build_prompt(self, *, source: Path, source_content: str) -> str:
         source_label = source.relative_to(self._agent_root).as_posix()
-        return f"""You are maintaining an LLM Wiki. Process this source document and integrate its knowledge into the wiki.
-
-Schema and conventions:
-{self._read_text(self._schema_file)}
-
-Current wiki state (index + recent pages):
-{self._build_wiki_context() or "(wiki is empty - this is the first source)"}
-
-New source to ingest (file: {source_label}):
-=== SOURCE START ===
-{source_content}
-=== SOURCE END ===
-
-Today's date: {date.today().isoformat()}
-
-Return ONLY a valid JSON object with these fields (no markdown fences, no prose outside the JSON):
-{{
-  "title": "Human-readable title for this source",
-  "slug": "kebab-case-slug-for-filename",
-  "source_page": "full markdown content for wiki/sources/<slug>.md - aggressively convert key people, products, concepts and projects into [[Wikilinks]] inline",
-  "index_entry": "- [Title](sources/slug.md) - one-line summary",
-  "overview_update": null,
-  "entity_pages": [
-    {{"path": "entities/EntityName.md", "content": "full markdown content"}}
-  ],
-  "concept_pages": [
-    {{"path": "concepts/ConceptName.md", "content": "full markdown content"}}
-  ],
-  "contradictions": ["describe any contradiction with existing wiki content, or empty list"],
-  "log_entry": "## [{date.today().isoformat()}] ingest | <title>\\n\\nAdded source. Key claims: ..."
-}}
-
-Important:
-- Always set "overview_update" to null. Do not rewrite wiki/overview.md in this response.
-- Keep generated entity_pages and concept_pages focused. Prefer the source_page, index_entry, contradictions, and log_entry.
-- Return complete JSON that can be parsed by json.loads; incomplete JSON is a failure.
-"""
+        return render_prompt(
+            "ingest.md",
+            schema=load_prompt("agent_instructions.md"),
+            wiki_context=self._build_wiki_context() or "(wiki is empty - this is the first source)",
+            source_label=source_label,
+            source_content=source_content,
+            today=date.today().isoformat(),
+        )
 
     def _build_wiki_context(self) -> str:
         parts: list[str] = []
@@ -465,21 +435,6 @@ Important:
         return self._call_llm_main
 
     def _load_llm_caller(self) -> Callable[[str, int | None], str]:
-        if not self._agent_root.exists():
-            raise IngestServiceError(f"llm-wiki-agent repo not found: {self._agent_root}")
-
-        agent_root_text = str(self._agent_root)
-        if agent_root_text not in sys.path:
-            sys.path.insert(0, agent_root_text)
-
-        try:
-            llm_config = importlib.import_module("tools.llm_config")
-        except ModuleNotFoundError as exc:
-            raise IngestServiceError("Unable to import llm-wiki-agent tools.llm_config.") from exc
-
-        call_llm_main = getattr(llm_config, "call_llm_main", None)
-        if not callable(call_llm_main):
-            raise IngestServiceError("llm-wiki-agent tools.llm_config is missing call_llm_main.")
         return call_llm_main
 
     @staticmethod

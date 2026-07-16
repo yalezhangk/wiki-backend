@@ -160,6 +160,109 @@ uv pip install --python .venv/bin/python -r requirements.txt
 
 依赖更新后应先在 DGX ARM64 上重新安装和验证，再重启长期运行进程。
 
+### 使用 systemd 后台运行
+
+生产环境使用 `systemd` 管理 Uvicorn 进程：
+
+创建 `/etc/systemd/system/wiki-backend.service`：
+
+```bash
+sudo nano /etc/systemd/system/wiki-backend.service
+```
+
+写入以下内容：
+
+```ini
+[Unit]
+Description=Wiki Backend FastAPI Service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=dgx
+Group=dgx
+
+WorkingDirectory=/home/dgx/Projects/knowledge_base_mkt/wiki-backend
+Environment=HOME=/home/dgx
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=/home/dgx/Projects/knowledge_base_mkt/wiki-backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8081
+
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=120s
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`WorkingDirectory` 必须指向项目根目录，使应用能够读取项目内的 `.env`。`ExecStart` 必须直接使用项目虚拟环境，并保持监听 `127.0.0.1:8081`。
+
+确认旧进程退出、`8081` 已释放后，验证并启用服务：
+
+```bash
+sudo systemd-analyze verify /etc/systemd/system/wiki-backend.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now wiki-backend.service
+```
+
+检查运行和开机自启状态：
+
+```bash
+sudo systemctl status wiki-backend.service --no-pager --full
+sudo systemctl is-active wiki-backend.service
+sudo systemctl is-enabled wiki-backend.service
+```
+
+常用维护命令：
+
+```bash
+# 启动
+sudo systemctl start wiki-backend.service
+
+# 停止
+sudo systemctl stop wiki-backend.service
+
+# 重启
+sudo systemctl restart wiki-backend.service
+
+# 查看完整状态
+sudo systemctl status wiki-backend.service --no-pager --full
+
+# 查看最近 200 行 systemd 日志
+sudo journalctl -u wiki-backend.service -n 200 --no-pager
+
+# 实时查看 systemd 日志
+sudo journalctl -u wiki-backend.service -f
+
+# 实时查看应用轮转日志
+tail -f /home/dgx/Logs/knowledge_base_mkt/wiki-backend/wiki-backend.log
+
+# 取消开机自启
+sudo systemctl disable wiki-backend.service
+```
+
+代码或依赖更新后的推荐流程：
+
+```bash
+cd /home/dgx/Projects/knowledge_base_mkt/wiki-backend
+
+sudo systemctl stop wiki-backend.service
+uv pip install --python .venv/bin/python -r requirements.txt
+.venv/bin/python -m unittest discover -s tests
+sudo systemctl start wiki-backend.service
+
+sudo systemctl status wiki-backend.service --no-pager --full
+curl --fail --silent --show-error http://127.0.0.1:8081/api/health
+curl --fail --silent --show-error http://127.0.0.1:8081/api/chats > /dev/null
+curl --fail --silent --show-error http://127.0.0.1:8080/api/health
+curl --fail --silent --show-error http://127.0.0.1:8080/api/chats > /dev/null
+```
+
+如果只是没有依赖变化的小型代码更新，在测试通过后可以直接执行 `sudo systemctl restart wiki-backend.service`。`/api/health` 只验证 FastAPI 进程存活，仍需通过 `/api/chats` 检查 MySQL 路径。
+
 ### 通过 SSH 隧道访问 FastAPI 文档
 
 FastAPI 文档仍由后端的 `/docs` 路径提供。由于后端只监听 DGX 回环地址，Windows 浏览器不能通过 `<DGX_HOST>:8081/docs` 直接访问。需要在 Windows PowerShell 中建立 SSH 本地端口转发：

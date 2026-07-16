@@ -91,8 +91,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=[
             "http://127.0.0.1:8080",
-            "http://localhost:8080",
-            "http://192.168.8.8:8080",
+            "http://localhost:8080"
         ],
         allow_credentials=False,
         allow_methods=["*"],
@@ -185,4 +184,4 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8081, reload=True)
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8081, reload=True)

@@ -25,7 +25,7 @@ Return only a valid JSON object with these fields. Do not include Markdown fence
   "slug": "kebab-case-slug-for-filename",
   "source_page": "full Markdown content for wiki/sources/<slug>.md with useful inline [[Wikilinks]]",
   "index_entry": "- [Title](sources/slug.md) - one-line summary",
-  "overview_update": null,
+  "overview_update": "full updated content for wiki/overview.md, or null if no update is warranted",
   "entity_pages": [
     {"path": "entities/EntityName.md", "content": "full Markdown content"}
   ],
@@ -37,7 +37,7 @@ Return only a valid JSON object with these fields. Do not include Markdown fence
 }
 
 Important:
-- Always set `"overview_update"` to `null`. Do not rewrite `wiki/overview.md` in this response.
+- Set `"overview_update"` to the complete updated `wiki/overview.md` only when the source materially changes the high-level synthesis; otherwise return `null`.
 - Keep generated entity and concept pages focused.
 - Prefer a complete source page, index entry, contradiction list, and log entry.
 - Return complete JSON that can be parsed by `json.loads`.

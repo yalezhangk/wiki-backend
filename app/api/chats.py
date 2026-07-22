@@ -109,7 +109,7 @@ def rename_chat(
         "\n"
         "- 恢复上下文"
         "\n"
-        "- 查看用户消息与助手回答的完整历史"
+        "- 查看用户消息与助手回答的完整历史及已持久化的结构化引用"
     ),
 )
 def list_chat_messages(
@@ -135,7 +135,7 @@ def list_chat_messages(
     summary="在已有会话中发送一条新消息",
     description=(
         "向指定聊天会话追加一条用户消息，服务端会结合该会话的历史上下文生成新的助手回复，"
-        "并把本轮用户消息和助手消息一起保存到 MySQL。"
+        "并把本轮用户消息、助手消息及结构化 Wiki 引用一起保存到 MySQL。"
     ),
 )
 def send_message(

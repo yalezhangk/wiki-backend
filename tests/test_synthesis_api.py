@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi.testclient import TestClient
 
@@ -40,7 +40,7 @@ class FakeSynthesisService:
             question_message_id=assistant_message_id - 1,
             title=title or "自动标题",
             path="syntheses/auto.md",
-            created_at=datetime(2026, 6, 22, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 22),
         )
 
 
@@ -65,7 +65,17 @@ class SynthesisApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["path"], "syntheses/auto.md")
+        self.assertEqual(
+            response.json(),
+            {
+                "chat_id": "chat-1",
+                "assistant_message_id": 2,
+                "question_message_id": 1,
+                "title": "自定义标题",
+                "path": "syntheses/auto.md",
+                "created_at": "2026-06-22T00:00:00",
+            },
+        )
         self.assertEqual(
             self.service.last_payload,
             {"chat_id": "chat-1", "assistant_message_id": 2, "title": "自定义标题"},

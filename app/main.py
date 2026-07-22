@@ -73,15 +73,19 @@ def create_app(
     app = FastAPI(
         title=settings.app_name,
         description=(
-            "Wiki Backend API，提供健康检查、单轮知识库问答，以及多轮聊天会话能力。"
+            "Wiki Backend API，提供健康检查、知识库问答、聊天会话、文档入库和分析保存能力。"
             "\n\n"
-            "接口分为三类："
+            "接口分为五类："
             "\n"
             "- `health`：用于服务存活检查。"
             "\n"
             "- `query`：无状态单轮问答，每次请求独立执行，不保存会话历史。"
             "\n"
             "- `chats`：有状态多轮聊天，消息会写入 MySQL，可按会话持续追问。"
+            "\n"
+            "- `ingest`：上传资料并查询异步入库任务状态；入库成功不代表 Quartz 已发布。"
+            "\n"
+            "- `synthesis`：根据已持久化的助手消息生成 Wiki Synthesis，不接收回答正文。"
         ),
         lifespan=lifespan,
     )
@@ -151,6 +155,8 @@ def create_app(
             "- 不保存消息历史到 MySQL"
             "\n"
             "- 适合临时提问、调试检索质量、验证知识库回答效果"
+            "\n\n"
+            "响应同时保留 `sources`、`relevant_pages`，并返回可直接映射 Wiki 页面的结构化 `citations`。"
         ),
     )
     def run_query(
@@ -166,6 +172,7 @@ def create_app(
             answer=result.answer,
             sources=result.sources,
             relevant_pages=result.relevant_pages,
+            citations=result.citations,
         )
 
     app.include_router(chats_router)

@@ -33,6 +33,7 @@ def create_synthesis(
     payload: SynthesisCreateRequest,
     synthesis_service: SynthesisService = Depends(get_synthesis_service),
 ) -> SynthesisResponse:
+    """读取已持久化的助手回答，将其保存为 Wiki Synthesis。"""
     try:
         return synthesis_service.save_chat_answer(
             chat_id=payload.chat_id,

@@ -36,6 +36,8 @@ def get_ingest_service(request: Request) -> IngestService:
         "\n"
         "- `auto_convert` 默认为 `true`，允许服务端先把非 Markdown 文件转换为 Markdown"
         "\n"
+        "- 服务端按 `WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES` 限制大小，并校验声明类型和关键文件签名"
+        "\n"
         "- 返回 `202 Accepted` 表示任务已入队，不表示 Wiki 写入已经完成"
     ),
 )
@@ -65,6 +67,8 @@ async def create_ingest_job(
     description=(
         "按创建时间倒序返回最近的 Ingest 任务，通常用于上传侧边栏或任务历史列表。"
         "\n\n"
+        "每个任务包含真实 `stage`、离散 `progress_percent` 和 `updated_at`；这些字段不表示 Quartz 发布状态。"
+        "\n\n"
         "`limit` 用于限制返回数量，服务端会把它约束在 1 到 100 之间。"
     ),
 )
@@ -88,7 +92,8 @@ def list_ingest_jobs(
     description=(
         "根据任务 ID 查询 Ingest 任务详情。"
         "\n\n"
-        "响应会包含任务状态、上传源路径、已创建或更新的 Wiki 页面、冲突记录、校验结果和失败原因。"
+        "响应会包含任务状态、真实处理阶段、离散进度、上传源路径、已创建或更新的 Wiki 页面、"
+        "冲突记录、校验结果和失败原因。失败任务会保留失败前最后一个阶段。"
     ),
 )
 def get_ingest_job(

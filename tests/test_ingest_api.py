@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi import UploadFile
 from fastapi.testclient import TestClient
@@ -22,10 +22,13 @@ class FakeIngestService:
             IngestJobResponse(
                 job_id="job-1",
                 status="queued",
+                stage="uploaded",
+                progress_percent=0,
                 original_filename="report.md",
                 source_path="raw/uploads/20260624-153012-report.md",
                 validation=IngestValidation(),
-                created_at=datetime(2026, 6, 24, 15, 30, 12, tzinfo=timezone.utc),
+                created_at=datetime(2026, 6, 24, 15, 30, 12),
+                updated_at=datetime(2026, 6, 24, 15, 30, 12),
             )
         ]
 
@@ -92,7 +95,26 @@ class IngestApiTests(unittest.TestCase):
         response = self.client.get("/api/ingest/jobs/job-1")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["source_path"], "raw/uploads/20260624-153012-report.md")
+        self.assertEqual(
+            response.json(),
+            {
+                "job_id": "job-1",
+                "status": "queued",
+                "stage": "uploaded",
+                "progress_percent": 0,
+                "original_filename": "report.md",
+                "source_path": "raw/uploads/20260624-153012-report.md",
+                "created_pages": [],
+                "updated_pages": [],
+                "contradictions": [],
+                "validation": {"broken_links": [], "unindexed": []},
+                "error": None,
+                "created_at": "2026-06-24T15:30:12",
+                "started_at": None,
+                "updated_at": "2026-06-24T15:30:12",
+                "finished_at": None,
+            },
+        )
 
     def test_get_ingest_job_maps_missing_job(self) -> None:
         response = self.client.get("/api/ingest/jobs/missing")

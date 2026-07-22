@@ -4,11 +4,22 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from app.schemas.chat import ChatMessageResponse, ChatResponse
-from app.schemas.query import QueryResult
+from app.schemas.query import CitationResponse, QueryResult
 from app.services.chat_service import ChatService
 from app.services.chat_turn_service import ChatTurnService
 from app.services.query_service import QueryServiceError
-from app.storage.mysql import ChatNotFoundError
+from app.storage.mysql import ChatNotFoundError, MySQLStorage
+
+
+class FakeSchemaCursor:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    def execute(self, query: str) -> None:
+        self.queries.append(" ".join(query.split()))
+
+    def fetchone(self) -> None:
+        return None
 
 
 class FakeStorage:
@@ -71,6 +82,7 @@ class FakeStorage:
         content: str,
         sources: list[str] | None = None,
         relevant_pages: list[str] | None = None,
+        citations: list[CitationResponse] | None = None,
     ) -> ChatMessageResponse:
         if chat_id != self.chat.id:
             raise ChatNotFoundError(chat_id)
@@ -82,6 +94,7 @@ class FakeStorage:
             content=content,
             sources=sources or [],
             relevant_pages=relevant_pages or [],
+            citations=citations or [],
             created_at=created_at,
         )
         self.next_message_id += 1
@@ -123,6 +136,13 @@ class FakeQueryService:
             answer=self.answer,
             sources=["PageA"],
             relevant_pages=["topic/page-a.md"],
+            citations=[
+                CitationResponse(
+                    path="topic/page-a.md",
+                    title="Page A",
+                    kind="page",
+                )
+            ],
         )
 
 
@@ -143,6 +163,7 @@ class ChatTurnServiceTests(unittest.TestCase):
         self.assertEqual(response.user_message.role, "user")
         self.assertEqual(response.assistant_message.role, "assistant")
         self.assertEqual(response.assistant_message.sources, ["PageA"])
+        self.assertEqual(response.assistant_message.citations[0].path, "topic/page-a.md")
         self.assertEqual(response.chat.title, "这是第一条问题，需要自动命名标题")
 
     def test_turn_preserves_multiline_markdown_and_normalizes_title(self) -> None:
@@ -192,6 +213,32 @@ value = 1
 
         self.assertEqual(len(self.storage.messages), 1)
         self.assertEqual(self.storage.messages[0].role, "user")
+
+    def test_mysql_upgrade_backfills_historical_citations(self) -> None:
+        cursor = FakeSchemaCursor()
+
+        MySQLStorage._ensure_message_citations_column(cursor)
+
+        statements = "\n".join(cursor.queries)
+        self.assertIn("ADD COLUMN citations JSON NULL", statements)
+        self.assertIn("SET citations = JSON_ARRAY()", statements)
+        self.assertIn("MODIFY COLUMN citations JSON NOT NULL", statements)
+
+    def test_historical_message_without_citations_recovers_empty_list(self) -> None:
+        storage = MySQLStorage("127.0.0.1", 3306, "user", "password", "database")
+        message = storage._message_from_row(
+            {
+                "id": 1,
+                "chat_id": "chat-1",
+                "role": "assistant",
+                "content": "answer",
+                "sources": "[]",
+                "relevant_pages": "[]",
+                "created_at": datetime(2026, 7, 22),
+            }
+        )
+
+        self.assertEqual(message.citations, [])
 
 
 if __name__ == "__main__":

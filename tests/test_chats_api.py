@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.schemas.chat import ChatMessageResponse, ChatResponse
-from app.schemas.query import QueryResult
+from app.schemas.query import CitationResponse, QueryResult
 from app.services.query_service import QueryServiceError
 from app.storage.mysql import ChatNotFoundError
 
@@ -18,8 +18,8 @@ class FakeChatService:
             id="chat-1",
             title="新对话",
             status="active",
-            created_at=datetime(2026, 6, 17, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 6, 17, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 17),
+            updated_at=datetime(2026, 6, 17),
             last_message_at=None,
             last_message_preview=None,
         )
@@ -65,7 +65,7 @@ class FakeChatTurnService:
             chat_id=chat_id,
             role="user",
             content=content,
-            created_at=datetime(2026, 6, 17, 0, 0, 1, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 17, 0, 0, 1),
         )
         assistant_message = ChatMessageResponse(
             id=2,
@@ -74,7 +74,14 @@ class FakeChatTurnService:
             content="answer",
             sources=["PageA"],
             relevant_pages=["topic/page-a.md"],
-            created_at=datetime(2026, 6, 17, 0, 0, 2, tzinfo=timezone.utc),
+            citations=[
+                CitationResponse(
+                    path="topic/page-a.md",
+                    title="Page A",
+                    kind="page",
+                )
+            ],
+            created_at=datetime(2026, 6, 17, 0, 0, 2),
         )
         return {
             "chat": self._chat_service.chat,
@@ -89,6 +96,13 @@ class FakeQueryService:
             answer=f"answer:{question}",
             sources=["PageA"],
             relevant_pages=["topic/page-a.md"],
+            citations=[
+                CitationResponse(
+                    path="topic/page-a.md",
+                    title="Page A",
+                    kind="page",
+                )
+            ],
         )
 
 
@@ -108,7 +122,18 @@ class ChatsApiTests(unittest.TestCase):
         response = self.client.get("/api/chats")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()[0]["id"], "chat-1")
+        self.assertEqual(
+            response.json()[0],
+            {
+                "id": "chat-1",
+                "title": "新对话",
+                "status": "active",
+                "created_at": "2026-06-17T00:00:00",
+                "updated_at": "2026-06-17T00:00:00",
+                "last_message_at": None,
+                "last_message_preview": None,
+            },
+        )
 
     def test_create_chat_allows_empty_body(self) -> None:
         response = self.client.post("/api/chats")
@@ -124,7 +149,7 @@ class ChatsApiTests(unittest.TestCase):
                 chat_id="chat-1",
                 role="assistant",
                 content=markdown,
-                created_at=datetime(2026, 6, 17, tzinfo=timezone.utc),
+                created_at=datetime(2026, 6, 17),
             )
         )
         response = self.client.get("/api/chats/chat-1/messages")
@@ -132,7 +157,12 @@ class ChatsApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["chat"]["id"], "chat-1")
         self.assertEqual(response.json()["messages"][0]["content"], markdown)
+        self.assertEqual(response.json()["messages"][0]["sources"], [])
+        self.assertEqual(response.json()["messages"][0]["relevant_pages"], [])
+        self.assertEqual(response.json()["messages"][0]["citations"], [])
+        self.assertEqual(response.json()["messages"][0]["created_at"], "2026-06-17T00:00:00")
         self.assertIsNone(response.json()["messages"][0]["synthesis_path"])
+        self.assertIsNone(response.json()["messages"][0]["synthesized_at"])
 
     def test_post_message_returns_turn_payload(self) -> None:
         response = self.client.post("/api/chats/chat-1/messages", json={"content": "hello"})
@@ -141,6 +171,17 @@ class ChatsApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["user_message"]["content"], "hello")
         self.assertEqual(payload["assistant_message"]["sources"], ["PageA"])
+        self.assertEqual(payload["assistant_message"]["relevant_pages"], ["topic/page-a.md"])
+        self.assertEqual(
+            payload["assistant_message"]["citations"][0],
+            {
+                "path": "topic/page-a.md",
+                "title": "Page A",
+                "kind": "page",
+                "excerpt": None,
+                "relevance": None,
+            },
+        )
 
     def test_post_message_returns_404_for_missing_chat(self) -> None:
         response = self.client.post("/api/chats/missing/messages", json={"content": "hello"})

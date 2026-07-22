@@ -51,6 +51,57 @@ http://127.0.0.1:8081/docs
 
 生产浏览器应通过同源入口访问，例如 `<SITE_ORIGIN>/api/health`，而不是直接请求 `8081`。
 
+### 当前响应契约基线
+
+- 所有 API 时间字段表示 UTC，精确到秒，当前序列化为不带 `Z` 或时区偏移的 ISO 8601 字符串，例如 `2026-07-22T10:01:08`。客户端不得按本地时区解释该字符串。
+- `source_path` 相对于 `WIKI_AGENT_REPO_PATH` 指向的 agent 仓库根目录，例如 `raw/uploads/report.md`。
+- `relevant_pages`、`created_pages`、`updated_pages`、`synthesis_path` 和 Synthesis 响应中的 `path` 都是相对于 `llm-wiki-agent/wiki` 的路径，统一使用 `/` 分隔符。
+- `sources` 来自回答中的 `[[...]]`，是可映射到 Wiki 页面的稳定标识，但可能只有页面名，也可能包含相对目录；不能假定它始终是带 `.md` 的文件路径。
+- `POST /api/query` 保持无状态，不会隐式创建 Chat。`POST /api/ingest/jobs` 返回 `202 Accepted` 仅表示任务已入队，`succeeded` 也不表示 Quartz 已发布。
+
+以上格式是兼容现有 Quartz 客户端的 Phase B0 基线。后续只以新增字段方式增强响应，不删除现有 `sources`、`relevant_pages` 或 Ingest 字段。
+
+### Ingest 阶段与进度
+
+Ingest 响应在保留 `status` 的同时提供 `stage`、`progress_percent` 和 `updated_at`。阶段与当前真实执行边界对应：
+
+| `stage` | `progress_percent` | 含义 |
+|---|---:|---|
+| `uploaded` | 0 | 文件已保存且任务已入队 |
+| `converting` | 10 | 非 Markdown 文件正在转换；Markdown 任务会跳过 |
+| `extracting` | 35 | 正在读取转换结果并调用 LLM 提取结构化知识 |
+| `writing_wiki` | 65 | 正在写入 Wiki 页面、索引和日志 |
+| `validating` | 85 | 正在检查断链和未索引页面 |
+| `completed` | 100 | 知识文件写入和校验已完成 |
+
+失败任务保留失败前最后一个 `stage` 和 `progress_percent`。这些百分比是离散阶段值，不表示阶段内部完成度，也不包含 Quartz build/publish 进度。
+
+上传文件采用分块读取，默认最大为 50 MiB，可通过
+`WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES` 调整。服务端会校验声明的 MIME 类型；PDF、Office、EPUB、XLS、RTF、WAV 和 MP3 等格式还会检查文件签名或容器结构。校验失败的临时上传文件会被删除，不创建 Ingest 任务。
+
+`created_pages` 和 `updated_pages` 根据本次写入前目标 Wiki 文件是否存在区分；重新入库并覆盖已有 Entity 或 Concept 时会进入 `updated_pages`。
+
+### 结构化引用
+
+`POST /api/query`、`POST /api/chats/{chat_id}/messages` 和会话历史响应在保留 `sources`、`relevant_pages` 的同时返回 `citations`：
+
+```json
+{
+  "path": "entities/MDC4.md",
+  "title": "MDC4",
+  "kind": "entity",
+  "excerpt": null,
+  "relevance": null
+}
+```
+
+- `path` 是经过越界检查的 Wiki 根目录相对路径。
+- `title` 依次来自 frontmatter、首个一级标题和文件名。
+- `kind` 支持 `source`、`entity`、`concept`、`synthesis`、`page`；未知类型回退为 `page`。
+- 当前检索层没有真实命中片段或相关度分数，因此 `excerpt`、`relevance` 返回 `null`，不生成推测值。
+- `citations` 只包含回答正文中真实出现且能安全映射的 `[[...]]` 引用，并保持首次出现顺序；检索上下文仍单独保存在 `relevant_pages`。
+- Chat 引用以 JSON 保存到 MySQL，刷新历史消息后仍可恢复；迁移前的旧消息安全回填为空列表。
+
 ### synthesis 请求示例
 
 ```json
@@ -86,6 +137,7 @@ WIKI_BACKEND_MYSQL_PASSWORD=replace-with-a-strong-password
 WIKI_BACKEND_MYSQL_DATABASE=wiki_backend
 WIKI_BACKEND_DEFAULT_CHAT_TITLE=新对话
 WIKI_BACKEND_CHAT_HISTORY_LIMIT=6
+WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES=52428800
 WIKI_BACKEND_LLM_FAST_PROVIDER=deepseek
 WIKI_BACKEND_LLM_FAST_MODEL=deepseek-v4-flash
 WIKI_BACKEND_LLM_MAIN_PROVIDER=deepseek

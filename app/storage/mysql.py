@@ -9,6 +9,7 @@ from uuid import uuid4
 from app.config import settings
 from app.schemas.chat import ChatMessageResponse, ChatResponse
 from app.schemas.ingest import IngestJobResponse, IngestValidation
+from app.schemas.query import CitationResponse
 
 
 class StorageError(RuntimeError):
@@ -63,6 +64,7 @@ class MySQLStorage:
                         content TEXT NOT NULL COMMENT '消息正文',
                         sources JSON NOT NULL COMMENT '回答引用来源列表（JSON）',
                         relevant_pages JSON NOT NULL COMMENT '查询命中的Wiki页面列表（JSON）',
+                        citations JSON NOT NULL COMMENT '结构化Wiki引用列表（JSON）',
                         created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
                         synthesis_path VARCHAR(500) NULL COMMENT '该助手消息保存成的Synthesis相对路径',
                         synthesized_at DATETIME NULL COMMENT '保存为Synthesis的时间（UTC）',
@@ -78,6 +80,8 @@ class MySQLStorage:
                     CREATE TABLE IF NOT EXISTS ingest_jobs (
                         id CHAR(36) PRIMARY KEY,
                         status VARCHAR(32) NOT NULL,
+                        stage VARCHAR(32) NOT NULL DEFAULT 'uploaded',
+                        progress_percent TINYINT UNSIGNED NOT NULL DEFAULT 0,
                         original_filename VARCHAR(255) NOT NULL,
                         stored_filename VARCHAR(255) NOT NULL,
                         source_path VARCHAR(500) NOT NULL,
@@ -88,10 +92,13 @@ class MySQLStorage:
                         error TEXT NULL,
                         created_at DATETIME NOT NULL,
                         started_at DATETIME NULL,
+                        updated_at DATETIME NOT NULL,
                         finished_at DATETIME NULL
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """
                 )
+                self._ensure_ingest_progress_columns(cursor)
+                self._ensure_message_citations_column(cursor)
                 self._apply_schema_comments(cursor)
                 self._ensure_index(cursor, "chats", "idx_chats_updated_at", "updated_at DESC")
                 self._ensure_index(cursor, "chat_messages", "idx_chat_messages_chat_id_id", "chat_id, id")
@@ -220,7 +227,8 @@ class MySQLStorage:
     def list_messages(self, chat_id: str) -> list[ChatMessageResponse]:
         rows = self._fetch_all(
             """
-            SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
+            SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                   created_at, synthesis_path, synthesized_at
             FROM chat_messages
             WHERE chat_id = %s
             ORDER BY id ASC
@@ -237,7 +245,8 @@ class MySQLStorage:
     ) -> list[ChatMessageResponse]:
         if before_message_id is None:
             query = """
-                SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
+                SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                       created_at, synthesis_path, synthesized_at
                 FROM chat_messages
                 WHERE chat_id = %s
                 ORDER BY id DESC
@@ -246,7 +255,8 @@ class MySQLStorage:
             params: tuple[Any, ...] = (chat_id, limit)
         else:
             query = """
-                SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
+                SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                       created_at, synthesis_path, synthesized_at
                 FROM chat_messages
                 WHERE chat_id = %s AND id < %s
                 ORDER BY id DESC
@@ -277,17 +287,24 @@ class MySQLStorage:
         content: str,
         sources: list[str] | None = None,
         relevant_pages: list[str] | None = None,
+        citations: list[CitationResponse] | None = None,
     ) -> ChatMessageResponse:
         created_at = self._utc_now()
         serialized_sources = json.dumps(sources or [], ensure_ascii=False)
         serialized_relevant_pages = json.dumps(relevant_pages or [], ensure_ascii=False)
+        serialized_citations = json.dumps(
+            [citation.model_dump(mode="json") for citation in citations or []],
+            ensure_ascii=False,
+        )
 
         with self.connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO chat_messages (chat_id, role, content, sources, relevant_pages, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO chat_messages (
+                        chat_id, role, content, sources, relevant_pages, citations, created_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         chat_id,
@@ -295,13 +312,15 @@ class MySQLStorage:
                         content,
                         serialized_sources,
                         serialized_relevant_pages,
+                        serialized_citations,
                         created_at,
                     ),
                 )
                 message_id = int(cursor.lastrowid)
                 cursor.execute(
                     """
-                    SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
+                    SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                           created_at, synthesis_path, synthesized_at
                     FROM chat_messages
                     WHERE id = %s
                     """,
@@ -315,7 +334,8 @@ class MySQLStorage:
     def get_message(self, chat_id: str, message_id: int) -> ChatMessageResponse | None:
         rows = self._fetch_all(
             """
-            SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
+            SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                   created_at, synthesis_path, synthesized_at
             FROM chat_messages
             WHERE chat_id = %s AND id = %s
             """,
@@ -332,7 +352,8 @@ class MySQLStorage:
     ) -> ChatMessageResponse | None:
         rows = self._fetch_all(
             """
-            SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
+            SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                   created_at, synthesis_path, synthesized_at
             FROM chat_messages
             WHERE chat_id = %s AND role = 'user' AND id < %s
             ORDER BY id DESC
@@ -369,7 +390,8 @@ class MySQLStorage:
                     return None
                 cursor.execute(
                     """
-                    SELECT id, chat_id, role, content, sources, relevant_pages, created_at, synthesis_path, synthesized_at
+                    SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                           created_at, synthesis_path, synthesized_at
                     FROM chat_messages
                     WHERE chat_id = %s AND id = %s
                     """,
@@ -397,11 +419,12 @@ class MySQLStorage:
                 cursor.execute(
                     """
                     INSERT INTO ingest_jobs (
-                        id, status, original_filename, stored_filename, source_path,
+                        id, status, stage, progress_percent,
+                        original_filename, stored_filename, source_path,
                         created_pages, updated_pages, contradictions, validation,
-                        error, created_at, started_at, finished_at
+                        error, created_at, started_at, updated_at, finished_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NULL, NULL)
+                    VALUES (%s, %s, 'uploaded', 0, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NULL, %s, NULL)
                     """,
                     (
                         job_id,
@@ -413,6 +436,7 @@ class MySQLStorage:
                         empty_array,
                         empty_array,
                         empty_validation,
+                        created_at,
                         created_at,
                     ),
                 )
@@ -444,10 +468,27 @@ class MySQLStorage:
         self._execute_update(
             """
             UPDATE ingest_jobs
-            SET status = 'running', started_at = %s, error = NULL
+            SET status = 'running', started_at = %s, updated_at = %s, error = NULL
             WHERE id = %s
             """,
-            (started_at, job_id),
+            (started_at, started_at, job_id),
+        )
+
+    def update_ingest_job_progress(
+        self,
+        *,
+        job_id: str,
+        stage: str,
+        progress_percent: int,
+        updated_at: datetime,
+    ) -> None:
+        self._execute_update(
+            """
+            UPDATE ingest_jobs
+            SET stage = %s, progress_percent = %s, updated_at = %s
+            WHERE id = %s
+            """,
+            (stage, progress_percent, updated_at, job_id),
         )
 
     def mark_ingest_job_succeeded(
@@ -464,11 +505,14 @@ class MySQLStorage:
             """
             UPDATE ingest_jobs
             SET status = 'succeeded',
+                stage = 'completed',
+                progress_percent = 100,
                 created_pages = %s,
                 updated_pages = %s,
                 contradictions = %s,
                 validation = %s,
                 error = NULL,
+                updated_at = %s,
                 finished_at = %s
             WHERE id = %s
             """,
@@ -478,6 +522,7 @@ class MySQLStorage:
                 json.dumps(contradictions, ensure_ascii=False),
                 validation.model_dump_json(),
                 finished_at,
+                finished_at,
                 job_id,
             ),
         )
@@ -486,10 +531,10 @@ class MySQLStorage:
         self._execute_update(
             """
             UPDATE ingest_jobs
-            SET status = 'failed', error = %s, finished_at = %s
+            SET status = 'failed', error = %s, updated_at = %s, finished_at = %s
             WHERE id = %s
             """,
-            (error, finished_at, job_id),
+            (error, finished_at, finished_at, job_id),
         )
 
     def update_chat_activity(
@@ -544,6 +589,84 @@ class MySQLStorage:
             raise StorageError("Storage update failed.") from exc
 
     @staticmethod
+    def _ensure_message_citations_column(cursor: Any) -> None:
+        cursor.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'chat_messages'
+              AND COLUMN_NAME = 'citations'
+            """
+        )
+        if cursor.fetchone() is not None:
+            return
+        cursor.execute(
+            """
+            ALTER TABLE chat_messages
+            ADD COLUMN citations JSON NULL AFTER relevant_pages
+            """
+        )
+        cursor.execute("UPDATE chat_messages SET citations = JSON_ARRAY() WHERE citations IS NULL")
+        cursor.execute(
+            """
+            ALTER TABLE chat_messages
+            MODIFY COLUMN citations JSON NOT NULL COMMENT '结构化Wiki引用列表（JSON）'
+            """
+        )
+
+    @staticmethod
+    def _ensure_ingest_progress_columns(cursor: Any) -> None:
+        cursor.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'ingest_jobs'
+              AND COLUMN_NAME IN ('stage', 'progress_percent', 'updated_at')
+            """
+        )
+        existing = {row["COLUMN_NAME"] for row in cursor.fetchall()}
+        if "stage" not in existing:
+            cursor.execute(
+                "ALTER TABLE ingest_jobs ADD COLUMN stage VARCHAR(32) NOT NULL DEFAULT 'uploaded' AFTER status"
+            )
+            cursor.execute(
+                """
+                UPDATE ingest_jobs
+                SET stage = CASE
+                    WHEN status = 'succeeded' THEN 'completed'
+                    WHEN status = 'running' THEN 'extracting'
+                    ELSE 'uploaded'
+                END
+                """
+            )
+        if "progress_percent" not in existing:
+            cursor.execute(
+                "ALTER TABLE ingest_jobs ADD COLUMN progress_percent TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER stage"
+            )
+            cursor.execute(
+                """
+                UPDATE ingest_jobs
+                SET progress_percent = CASE
+                    WHEN status = 'succeeded' THEN 100
+                    WHEN status = 'running' THEN 35
+                    ELSE 0
+                END
+                """
+            )
+        if "updated_at" not in existing:
+            cursor.execute("ALTER TABLE ingest_jobs ADD COLUMN updated_at DATETIME NULL AFTER started_at")
+            cursor.execute(
+                """
+                UPDATE ingest_jobs
+                SET updated_at = COALESCE(finished_at, started_at, created_at)
+                WHERE updated_at IS NULL
+                """
+            )
+            cursor.execute("ALTER TABLE ingest_jobs MODIFY COLUMN updated_at DATETIME NOT NULL")
+
+    @staticmethod
     def _apply_schema_comments(cursor: Any) -> None:
         # CREATE TABLE IF NOT EXISTS does not update comments on existing tables.
         expected_table_comments = {
@@ -566,6 +689,7 @@ class MySQLStorage:
                 "content": "消息正文",
                 "sources": "回答引用来源列表（JSON）",
                 "relevant_pages": "查询命中的Wiki页面列表（JSON）",
+                "citations": "结构化Wiki引用列表（JSON）",
                 "created_at": "创建时间（UTC）",
                 "synthesis_path": "该助手消息保存成的Synthesis相对路径",
                 "synthesized_at": "保存为Synthesis的时间（UTC）",
@@ -659,6 +783,7 @@ class MySQLStorage:
                     MODIFY COLUMN content TEXT NOT NULL COMMENT '消息正文',
                     MODIFY COLUMN sources JSON NOT NULL COMMENT '回答引用来源列表（JSON）',
                     MODIFY COLUMN relevant_pages JSON NOT NULL COMMENT '查询命中的Wiki页面列表（JSON）',
+                    MODIFY COLUMN citations JSON NOT NULL COMMENT '结构化Wiki引用列表（JSON）',
                     MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
                     MODIFY COLUMN synthesis_path VARCHAR(500) NULL COMMENT '该助手消息保存成的Synthesis相对路径',
                     MODIFY COLUMN synthesized_at DATETIME NULL COMMENT '保存为Synthesis的时间（UTC）',
@@ -708,15 +833,36 @@ class MySQLStorage:
             content=str(row["content"]),
             sources=self._parse_json_field(row.get("sources")),
             relevant_pages=self._parse_json_field(row.get("relevant_pages")),
+            citations=self._parse_citations_field(row.get("citations")),
             created_at=row["created_at"],
             synthesis_path=row.get("synthesis_path"),
             synthesized_at=row.get("synthesized_at"),
         )
 
+    @staticmethod
+    def _parse_citations_field(value: Any) -> list[CitationResponse]:
+        parsed: Any = value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return []
+        if not isinstance(parsed, list):
+            return []
+        citations: list[CitationResponse] = []
+        for item in parsed:
+            try:
+                citations.append(CitationResponse.model_validate(item))
+            except (TypeError, ValueError):
+                continue
+        return citations
+
     def _ingest_job_from_row(self, row: dict[str, Any]) -> IngestJobResponse:
         return IngestJobResponse(
             job_id=str(row["id"]),
             status=row["status"],
+            stage=row.get("stage", "uploaded"),
+            progress_percent=int(row.get("progress_percent", 0)),
             original_filename=str(row["original_filename"]),
             source_path=str(row["source_path"]),
             created_pages=self._parse_json_field(row.get("created_pages")),
@@ -726,6 +872,7 @@ class MySQLStorage:
             error=row.get("error"),
             created_at=row["created_at"],
             started_at=row.get("started_at"),
+            updated_at=row.get("updated_at") or row["created_at"],
             finished_at=row.get("finished_at"),
         )
 

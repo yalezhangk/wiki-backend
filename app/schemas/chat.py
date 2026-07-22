@@ -5,6 +5,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, StringConstraints
 
+from app.schemas.query import CitationResponse
+
 NonEmptyContent = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
 ChatTitle = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
@@ -35,9 +37,9 @@ class ChatResponse(BaseModel):
     id: str = Field(description="聊天会话 ID。")
     title: str = Field(description="聊天会话标题。")
     status: str = Field(description="会话状态。当前实现通常为 active。")
-    created_at: datetime = Field(description="会话创建时间。")
-    updated_at: datetime = Field(description="会话最近更新时间。")
-    last_message_at: datetime | None = Field(default=None, description="最近一条消息的创建时间。")
+    created_at: datetime = Field(description="会话创建时间，UTC、秒精度。")
+    updated_at: datetime = Field(description="会话最近更新时间，UTC、秒精度。")
+    last_message_at: datetime | None = Field(default=None, description="最近一条消息的创建时间，UTC、秒精度。")
     last_message_preview: str | None = Field(
         default=None,
         description="最近一条消息的摘要预览，便于会话列表展示。",
@@ -62,20 +64,24 @@ class ChatMessageResponse(BaseModel):
     content: str = Field(description="消息正文内容。")
     sources: list[str] = Field(
         default_factory=list,
-        description="当消息角色为 `assistant` 时，可能附带的来源文档列表。",
+        description="助手回答中 `[[...]]` 提取出的 Wiki 标识列表；用户消息通常为空列表。",
     )
     relevant_pages: list[str] = Field(
         default_factory=list,
-        description="当消息角色为 `assistant` 时，检索阶段使用的相关页面列表。",
+        description="助手回答检索时使用的 Wiki 根目录相对路径列表；用户消息通常为空列表。",
     )
-    created_at: datetime = Field(description="消息创建时间。")
+    citations: list[CitationResponse] = Field(
+        default_factory=list,
+        description="助手回答的结构化 Wiki 引用；用户消息和旧历史消息通常为空列表。",
+    )
+    created_at: datetime = Field(description="消息创建时间，UTC、秒精度。")
     synthesis_path: str | None = Field(
         default=None,
         description="该助手消息保存成 Synthesis 后的 Wiki 相对路径。",
     )
     synthesized_at: datetime | None = Field(
         default=None,
-        description="该助手消息保存为 Synthesis 的时间。",
+        description="该助手消息保存为 Synthesis 的时间，UTC、秒精度。",
     )
 
 

@@ -5,15 +5,24 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Sequence, cast
 
 from app.llm_config import call_llm_fast, call_llm_main
 from app.prompts import load_prompt, render_prompt
 from app.schemas.chat import ChatMessageResponse
-from app.schemas.query import QueryResult
+from app.schemas.query import CitationKind, CitationResponse, QueryResult
 
 LOGGER = logging.getLogger(__name__)
 SOURCE_PATTERN = re.compile(r"\[\[([^\]]+)\]\]")
+FRONTMATTER_FIELD_PATTERN = re.compile(r"^(title|type):\s*(.*?)\s*$", re.MULTILINE)
+HEADING_PATTERN = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
+KNOWN_CITATION_KINDS = {"source", "entity", "concept", "synthesis", "page"}
+DIRECTORY_KINDS = {
+    "sources": "source",
+    "entities": "entity",
+    "concepts": "concept",
+    "syntheses": "synthesis",
+}
 
 
 class QueryServiceError(RuntimeError):
@@ -22,6 +31,28 @@ class QueryServiceError(RuntimeError):
 
 def read_file(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def resolve_wiki_page(wiki_dir: Path, value: str) -> Path | None:
+    normalized = value.strip().replace("\\", "/")
+    if not normalized:
+        return None
+    relative = Path(normalized)
+    if relative.is_absolute() or ".." in relative.parts:
+        return None
+    if relative.suffix == "":
+        relative = relative.with_suffix(".md")
+    if relative.suffix.lower() != ".md":
+        return None
+    wiki_root = wiki_dir.resolve()
+    candidate = (wiki_root / relative).resolve()
+    try:
+        candidate.relative_to(wiki_root)
+    except ValueError:
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate
 
 
 def find_relevant_pages(question: str, index_content: str, wiki_dir: Path, graph_json: Path) -> list[Path]:
@@ -42,8 +73,8 @@ def find_relevant_pages(question: str, index_content: str, wiki_dir: Path, graph
             matched = any(word in question_lower for word in title_lower.split() if len(word) > 2)
 
         if matched:
-            page = wiki_dir / href
-            if page.exists() and page not in relevant:
+            page = resolve_wiki_page(wiki_dir, href)
+            if page is not None and page not in relevant:
                 relevant.append(page)
 
     if graph_json.exists() and relevant:
@@ -58,8 +89,8 @@ def find_relevant_pages(question: str, index_content: str, wiki_dir: Path, graph
                     elif edge.get("to") in page_ids:
                         neighbors.add(edge["from"])
             for node_id in neighbors:
-                neighbor = wiki_dir / f"{node_id}.md"
-                if neighbor.exists() and neighbor not in relevant:
+                neighbor = resolve_wiki_page(wiki_dir, f"{node_id}.md")
+                if neighbor is not None and neighbor not in relevant:
                     relevant.append(neighbor)
         except (json.JSONDecodeError, KeyError, TypeError):
             LOGGER.warning("Failed to expand relevant pages from graph.json", exc_info=True)
@@ -120,10 +151,13 @@ class QueryService:
         if not normalized_answer:
             raise QueryServiceError("LLM returned an empty answer")
 
+        ordered_sources = list(dict.fromkeys(SOURCE_PATTERN.findall(normalized_answer)))
+        sources = sorted(set(ordered_sources))
         return QueryResult(
             answer=normalized_answer,
-            sources=sorted(set(SOURCE_PATTERN.findall(normalized_answer))),
+            sources=sources,
             relevant_pages=[page.relative_to(self._wiki_dir).as_posix() for page in relevant_pages],
+            citations=self._build_citations(sources=ordered_sources, relevant_pages=relevant_pages),
         )
 
     def _select_relevant_pages(self, question: str, index_content: str) -> list[Path]:
@@ -159,11 +193,104 @@ class QueryService:
         for path_text in parsed_paths:
             if not isinstance(path_text, str):
                 continue
-            candidate = self._wiki_dir / path_text
-            if candidate.exists() and candidate not in selected_pages:
+            candidate = self._resolve_wiki_page(path_text)
+            if candidate is not None and candidate not in selected_pages:
                 selected_pages.append(candidate)
 
         return selected_pages or relevant_pages
+
+    def _resolve_wiki_page(self, value: str) -> Path | None:
+        return resolve_wiki_page(self._wiki_dir, value)
+
+    def _build_citations(
+        self,
+        *,
+        sources: list[str],
+        relevant_pages: list[Path],
+    ) -> list[CitationResponse]:
+        safe_relevant_pages = [
+            page.resolve()
+            for page in relevant_pages
+            if self._is_safe_wiki_page(page)
+        ]
+        ordered_pages: list[Path] = []
+        for source in sources:
+            page = self._resolve_source_reference(source, safe_relevant_pages)
+            if page is not None and page not in ordered_pages:
+                ordered_pages.append(page)
+        return [self._citation_from_page(page) for page in ordered_pages]
+
+    def _resolve_source_reference(self, source: str, preferred_pages: list[Path]) -> Path | None:
+        reference = source.split("|", 1)[0].split("#", 1)[0].strip().replace("\\", "/")
+        if not reference:
+            return None
+        relative_reference = reference[:-3] if reference.lower().endswith(".md") else reference
+        folded_reference = relative_reference.casefold()
+        preferred_matches = [
+            page
+            for page in preferred_pages
+            if self._page_matches_reference(page, folded_reference)
+        ]
+        if len(preferred_matches) == 1:
+            return preferred_matches[0]
+        if "/" in reference:
+            return self._resolve_wiki_page(reference)
+        matches = [
+            page.resolve()
+            for page in self._wiki_dir.rglob("*.md")
+            if page.stem.casefold() == folded_reference and self._is_safe_wiki_page(page)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _page_matches_reference(self, page: Path, folded_reference: str) -> bool:
+        relative = page.relative_to(self._wiki_dir).as_posix()
+        without_suffix = relative[:-3] if relative.lower().endswith(".md") else relative
+        return without_suffix.casefold() == folded_reference or page.stem.casefold() == folded_reference
+
+    def _is_safe_wiki_page(self, page: Path) -> bool:
+        try:
+            resolved = page.resolve()
+            resolved.relative_to(self._wiki_dir.resolve())
+        except (OSError, ValueError):
+            return False
+        return resolved.is_file() and resolved.suffix.lower() == ".md"
+
+    def _citation_from_page(self, page: Path) -> CitationResponse:
+        relative = page.relative_to(self._wiki_dir).as_posix()
+        content = page.read_text(encoding="utf-8")
+        metadata = self._read_frontmatter_fields(content)
+        title = metadata.get("title") or self._read_first_heading(content) or page.stem
+        metadata_kind = metadata.get("type", "").lower()
+        directory_kind = DIRECTORY_KINDS.get(Path(relative).parts[0].lower())
+        kind_text = metadata_kind if metadata_kind in KNOWN_CITATION_KINDS else directory_kind or "page"
+        return CitationResponse(
+            path=relative,
+            title=title,
+            kind=cast(CitationKind, kind_text),
+        )
+
+    @staticmethod
+    def _read_frontmatter_fields(content: str) -> dict[str, str]:
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+        if not normalized.startswith("---\n"):
+            return {}
+        closing = normalized.find("\n---", 4)
+        if closing == -1:
+            return {}
+        fields: dict[str, str] = {}
+        for key, raw_value in FRONTMATTER_FIELD_PATTERN.findall(normalized[4:closing]):
+            value = raw_value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            if value:
+                fields[key] = value
+        return fields
+
+    @staticmethod
+    def _read_first_heading(content: str) -> str | None:
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+        match = HEADING_PATTERN.search(normalized)
+        return match.group(1).strip() if match else None
 
     @staticmethod
     def _call_llm_with_retry(

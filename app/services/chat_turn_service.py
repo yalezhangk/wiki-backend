@@ -43,6 +43,7 @@ class ChatTurnService:
             content=query_result.answer,
             sources=query_result.sources,
             relevant_pages=query_result.relevant_pages,
+            citations=query_result.citations,
         )
         latest_chat = self._chat_service.update_chat_activity(
             chat_id=chat_id,

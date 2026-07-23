@@ -13,7 +13,11 @@ from app.schemas.chat import ChatMessageResponse
 from app.schemas.query import CitationKind, CitationResponse, QueryResult
 
 LOGGER = logging.getLogger(__name__)
-SOURCE_PATTERN = re.compile(r"\[\[([^\]]+)\]\]")
+INLINE_CITATION_PATTERN = re.compile(r"\[(\d+)\]")
+TRAILING_SOURCES_SECTION_PATTERN = re.compile(
+    r"(?:\n|^)[ \t]{0,3}#{2,6}[ \t]*(?:sources?|引用来源)[ \t]*:?[ \t]*(?:\n.*)?\Z",
+    re.IGNORECASE | re.DOTALL,
+)
 FRONTMATTER_FIELD_PATTERN = re.compile(r"^(title|type):\s*(.*?)\s*$", re.MULTILINE)
 HEADING_PATTERN = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 KNOWN_CITATION_KINDS = {"source", "entity", "concept", "synthesis", "page"}
@@ -132,6 +136,7 @@ class QueryService:
             schema=load_prompt("agent_instructions.md"),
             pages_context=pages_context,
             conversation_history=self._build_conversation_history(history_messages),
+            sources=self._build_stable_sources(relevant_pages),
         )
         _, call_llm_main = self._get_llm_callers()
 
@@ -147,17 +152,16 @@ class QueryService:
         except Exception as exc:
             raise QueryServiceError("Failed to generate query answer via backend LLM config.") from exc
 
-        normalized_answer = answer.strip()
+        sources = self._build_stable_sources(relevant_pages)
+        normalized_answer = self._normalize_answer(answer, source_count=len(sources))
         if not normalized_answer:
             raise QueryServiceError("LLM returned an empty answer")
 
-        ordered_sources = list(dict.fromkeys(SOURCE_PATTERN.findall(normalized_answer)))
-        sources = sorted(set(ordered_sources))
         return QueryResult(
             answer=normalized_answer,
             sources=sources,
             relevant_pages=[page.relative_to(self._wiki_dir).as_posix() for page in relevant_pages],
-            citations=self._build_citations(sources=ordered_sources, relevant_pages=relevant_pages),
+            citations=self._build_citations(sources=sources, relevant_pages=relevant_pages),
         )
 
     def _select_relevant_pages(self, question: str, index_content: str) -> list[Path]:
@@ -219,6 +223,28 @@ class QueryService:
             if page is not None and page not in ordered_pages:
                 ordered_pages.append(page)
         return [self._citation_from_page(page) for page in ordered_pages]
+
+    def _build_stable_sources(self, relevant_pages: Sequence[Path]) -> list[str]:
+        """Return safe Wiki-relative evidence paths in retrieval order."""
+        sources: list[str] = []
+        for page in relevant_pages:
+            if not self._is_safe_wiki_page(page):
+                continue
+            source = page.resolve().relative_to(self._wiki_dir.resolve()).as_posix()
+            if source not in sources:
+                sources.append(source)
+        return sources
+
+    @staticmethod
+    def _normalize_answer(answer: str, *, source_count: int) -> str:
+        """Remove legacy source lists and invalid inline citation markers."""
+        without_sources = TRAILING_SOURCES_SECTION_PATTERN.sub("", answer).strip()
+
+        def replace_marker(match: re.Match[str]) -> str:
+            marker = int(match.group(1))
+            return f"[{marker}]" if 1 <= marker <= source_count else ""
+
+        return INLINE_CITATION_PATTERN.sub(replace_marker, without_sources).strip()
 
     def _resolve_source_reference(self, source: str, preferred_pages: list[Path]) -> Path | None:
         reference = source.split("|", 1)[0].split("#", 1)[0].strip().replace("\\", "/")
@@ -337,6 +363,7 @@ class QueryService:
         schema: str,
         pages_context: str,
         conversation_history: str,
+        sources: Sequence[str],
     ) -> str:
         return render_prompt(
             "query.md",
@@ -344,6 +371,10 @@ class QueryService:
             schema=schema,
             pages_context=pages_context,
             conversation_history=conversation_history,
+            sources="\n".join(
+                f"[{index}] {source}" for index, source in enumerate(sources, start=1)
+            )
+            or "(none)",
         )
 
     @staticmethod

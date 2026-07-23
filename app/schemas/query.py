@@ -34,8 +34,8 @@ class QueryResponse(BaseModel):
     answer: str = Field(description="LLM 生成的最终回答。")
     sources: list[str] = Field(
         default_factory=list,
-        description="从回答 `[[...]]` 中提取的 Wiki 标识列表；标识可能是页面名，不保证包含文件扩展名。",
-        examples=[["产品说明", "entities/Smart HVX"]],
+        description="按检索顺序稳定去重的 Wiki 根目录相对来源路径；正文 `[n]` 对应 `sources[n - 1]`。",
+        examples=[["sources/产品说明.md", "entities/Smart HVX.md"]],
     )
     relevant_pages: list[str] = Field(
         default_factory=list,

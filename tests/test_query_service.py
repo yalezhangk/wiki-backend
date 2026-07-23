@@ -27,6 +27,7 @@ class QueryServiceTests(unittest.TestCase):
             schema="schema text",
             pages_context="page context",
             conversation_history="User: previous question",
+            sources=["entities/First.md", "sources/second.md"],
         )
 
         self.assertIn("Conversation history:", prompt)
@@ -37,6 +38,10 @@ class QueryServiceTests(unittest.TestCase):
         self.assertIn("Do not use the current user question as the answer title or as a heading", prompt)
         self.assertIn("headings must be on their own line", prompt)
         self.assertIn("Never collapse headings, paragraphs, or bullet lists", prompt)
+        self.assertIn("override any conflicting citation instruction", prompt)
+        self.assertIn("Do not add a `## Sources`", prompt)
+        self.assertIn("[1] entities/First.md", prompt)
+        self.assertIn("[2] sources/second.md", prompt)
 
     def test_run_chat_turn_uses_latest_six_messages(self) -> None:
         service = QueryService.__new__(QueryService)
@@ -157,7 +162,22 @@ class QueryServiceTests(unittest.TestCase):
 
         self.assertEqual([citation.title for citation in citations], ["Second", "First"])
 
-    def test_run_keeps_legacy_sources_sorted_and_citations_in_answer_order(self) -> None:
+    def test_normalize_answer_removes_legacy_sources_and_invalid_markers(self) -> None:
+        answer = (
+            "Supported claim.[1] Unsupported claim.[3] No source.[0]\n\n"
+            "## 引用来源\n"
+            "- sources/first.md\n"
+        )
+
+        normalized = QueryService._normalize_answer(answer, source_count=2)
+
+        self.assertEqual(normalized, "Supported claim.[1] Unsupported claim. No source.")
+        self.assertEqual(
+            QueryService._normalize_answer("Supported claim.[1]\n\n## Source", source_count=1),
+            "Supported claim.[1]",
+        )
+
+    def test_run_uses_stable_source_paths_for_inline_marker_numbers(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             wiki = root / "wiki"
@@ -169,12 +189,20 @@ class QueryServiceTests(unittest.TestCase):
             service = QueryService(root)
             service._call_llm_fast = lambda prompt, max_tokens=None: "[]"
             service._call_llm_main = (
-                lambda prompt, max_tokens=None: "[[Second]] then [[First]] and [[Second]]"
+                lambda prompt, max_tokens=None: (
+                    "Second evidence.[1] First evidence.[2] Invalid marker.[3]\n\n"
+                    "## Sources\n"
+                    "- entities/Second.md\n"
+                )
             )
+            second = entities / "Second.md"
+            first = entities / "First.md"
+            service._select_relevant_pages = lambda question, index: [second, first, second]  # type: ignore[method-assign]
 
             result = service.run("question")
 
-        self.assertEqual(result.sources, ["First", "Second"])
+        self.assertEqual(result.answer, "Second evidence.[1] First evidence.[2] Invalid marker.")
+        self.assertEqual(result.sources, ["entities/Second.md", "entities/First.md"])
         self.assertEqual(
             [citation.title for citation in result.citations],
             ["Second", "First"],

@@ -116,12 +116,21 @@ class QueryService:
         self._call_llm_main: Callable[[str, int | None], str] | None = None
 
     def run(self, question: str) -> QueryResult:
-        return self._run(question=question, history_messages=[])
+        return self._run(question=question, history_messages=[], use_wiki_links=False)
 
     def run_chat_turn(self, question: str, history_messages: Sequence[ChatMessageResponse]) -> QueryResult:
-        return self._run(question=question, history_messages=list(history_messages)[-6:])
+        return self._run(
+            question=question,
+            history_messages=list(history_messages)[-6:],
+            use_wiki_links=True,
+        )
 
-    def _run(self, question: str, history_messages: Sequence[ChatMessageResponse]) -> QueryResult:
+    def _run(
+        self,
+        question: str,
+        history_messages: Sequence[ChatMessageResponse],
+        use_wiki_links: bool,
+    ) -> QueryResult:
         normalized_question = question.strip()
         if not normalized_question:
             raise QueryServiceError("question cannot be empty")
@@ -132,12 +141,16 @@ class QueryService:
 
         relevant_pages = self._select_relevant_pages(normalized_question, index_content)
         pages_context = self._build_pages_context(relevant_pages, index_content)
+        sources = self._build_stable_sources(relevant_pages)
+        citations = self._build_citations(sources=sources, relevant_pages=relevant_pages)
         prompt = self._build_answer_prompt(
             question=normalized_question,
             schema=load_prompt("agent_instructions.md"),
             pages_context=pages_context,
             conversation_history=self._build_conversation_history(history_messages),
-            sources=self._build_stable_sources(relevant_pages),
+            sources=sources,
+            citations=citations,
+            use_wiki_links=use_wiki_links,
         )
         _, call_llm_main = self._get_llm_callers()
 
@@ -153,8 +166,12 @@ class QueryService:
         except Exception as exc:
             raise QueryServiceError("Failed to generate query answer via backend LLM config.") from exc
 
-        sources = self._build_stable_sources(relevant_pages)
         normalized_answer = self._normalize_answer(answer, source_count=len(sources))
+        if use_wiki_links:
+            normalized_answer = self._replace_inline_citations_with_wiki_links(
+                normalized_answer,
+                citations,
+            )
         if not normalized_answer:
             raise QueryServiceError("LLM returned an empty answer")
 
@@ -162,7 +179,7 @@ class QueryService:
             answer=normalized_answer,
             sources=sources,
             relevant_pages=[page.relative_to(self._wiki_dir).as_posix() for page in relevant_pages],
-            citations=self._build_citations(sources=sources, relevant_pages=relevant_pages),
+            citations=citations,
         )
 
     def _select_relevant_pages(self, question: str, index_content: str) -> list[Path]:
@@ -246,6 +263,22 @@ class QueryService:
             return f"[{marker}]" if 1 <= marker <= source_count else ""
 
         return INLINE_CITATION_PATTERN.sub(replace_marker, without_sources).strip()
+
+    @staticmethod
+    def _replace_inline_citations_with_wiki_links(
+        answer: str,
+        citations: Sequence[CitationResponse],
+    ) -> str:
+        """Convert valid numeric chat citations to their rendered Wiki links."""
+
+        def replace_marker(match: re.Match[str]) -> str:
+            citation_index = int(match.group(1)) - 1
+            if not 0 <= citation_index < len(citations):
+                return ""
+            citation = citations[citation_index]
+            return QueryService._format_wiki_link(citation)
+
+        return INLINE_CITATION_PATTERN.sub(replace_marker, answer)
 
     def _resolve_source_reference(self, source: str, preferred_pages: list[Path]) -> Path | None:
         reference = source.split("|", 1)[0].split("#", 1)[0].strip().replace("\\", "/")
@@ -365,18 +398,41 @@ class QueryService:
         pages_context: str,
         conversation_history: str,
         sources: Sequence[str],
+        citations: Sequence[CitationResponse],
+        use_wiki_links: bool,
     ) -> str:
+        if use_wiki_links:
+            citation_instructions = (
+                "- Use only the Wiki links below for citations. For each key conclusion with clear "
+                "support, add the matching Wiki link at the end of the sentence.\n"
+                "- Do not use numbered `[n]` citations or any other citation syntax."
+            )
+            evidence_sources = "\n".join(
+                QueryService._format_wiki_link(citation) for citation in citations
+            ) or "(none)"
+        else:
+            citation_instructions = (
+                "- Use only the numbered evidence sources below for citations. For each key conclusion "
+                "with clear support, add its source marker at the end of the sentence as `[n]`.\n"
+                "- Do not use `[[PageName]]` wikilinks or any other citation syntax."
+            )
+            evidence_sources = "\n".join(
+                f"[{index}] {source}" for index, source in enumerate(sources, start=1)
+            ) or "(none)"
         return render_prompt(
             "query.md",
             question=question,
             schema=schema,
             pages_context=pages_context,
             conversation_history=conversation_history,
-            sources="\n".join(
-                f"[{index}] {source}" for index, source in enumerate(sources, start=1)
-            )
-            or "(none)",
+            citation_instructions=citation_instructions,
+            sources=evidence_sources,
         )
+
+    @staticmethod
+    def _format_wiki_link(citation: CitationResponse) -> str:
+        target = citation.path.removesuffix(".md")
+        return f"[[{target}|{citation.title}]]"
 
     @staticmethod
     def _parse_json_array(raw: str) -> list[str] | None:

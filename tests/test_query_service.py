@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from app.config import settings
 from app.schemas.chat import ChatMessageResponse
-from app.schemas.query import QueryResult
+from app.schemas.query import CitationResponse, QueryResult
 from app.services.query_service import QueryService
 
 
@@ -29,6 +29,8 @@ class QueryServiceTests(unittest.TestCase):
             pages_context="page context",
             conversation_history="User: previous question",
             sources=["entities/First.md", "sources/second.md"],
+            citations=[],
+            use_wiki_links=False,
         )
 
         self.assertIn("Conversation history:", prompt)
@@ -44,11 +46,72 @@ class QueryServiceTests(unittest.TestCase):
         self.assertIn("[1] entities/First.md", prompt)
         self.assertIn("[2] sources/second.md", prompt)
 
+    def test_chat_answer_prompt_uses_actual_wiki_link_references(self) -> None:
+        citation = CitationResponse(
+            path="entities/MDC4.md",
+            title="MDC4 智能监控单元",
+            kind="entity",
+        )
+
+        prompt = QueryService._build_answer_prompt(
+            question="current question",
+            schema="schema text",
+            pages_context="page context",
+            conversation_history="(none)",
+            sources=["entities/MDC4.md"],
+            citations=[citation],
+            use_wiki_links=True,
+        )
+
+        self.assertIn("Do not use numbered `[n]` citations", prompt)
+        self.assertIn("[[entities/MDC4|MDC4 智能监控单元]]", prompt)
+
+    def test_chat_citations_convert_numeric_markers_to_wiki_links(self) -> None:
+        citation = CitationResponse(
+            path="entities/MDC4.md",
+            title="MDC4 智能监控单元",
+            kind="entity",
+        )
+
+        answer = QueryService._replace_inline_citations_with_wiki_links(
+            "MDC4 是智能监控单元。[1]",
+            [citation],
+        )
+
+        self.assertEqual(answer, "MDC4 是智能监控单元。[[entities/MDC4|MDC4 智能监控单元]]")
+
+    def test_run_chat_turn_returns_actual_wiki_link_for_numeric_citation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wiki = root / "wiki"
+            entities = wiki / "entities"
+            entities.mkdir(parents=True)
+            (wiki / "index.md").write_text("# Index", encoding="utf-8")
+            page = entities / "MDC4.md"
+            page.write_text(
+                '---\ntitle: "MDC4 智能监控单元"\ntype: entity\n---\n\n# MDC4\n',
+                encoding="utf-8",
+            )
+            service = QueryService(root)
+            service._select_relevant_pages = lambda question, index: [page]  # type: ignore[method-assign]
+            service._call_llm_fast = lambda prompt, max_tokens=None: "[]"
+            service._call_llm_main = lambda prompt, max_tokens=None: "MDC4 是智能监控单元。[1]"
+
+            result = service.run_chat_turn("MDC4 是什么？", [])
+
+        self.assertEqual(result.answer, "MDC4 是智能监控单元。[[entities/MDC4|MDC4 智能监控单元]]")
+        self.assertEqual(result.sources, ["entities/MDC4.md"])
+
     def test_run_chat_turn_uses_latest_six_messages(self) -> None:
         service = QueryService.__new__(QueryService)
         captured_history: list[ChatMessageResponse] = []
 
-        def fake_run(question: str, history_messages: list[ChatMessageResponse]) -> QueryResult:
+        def fake_run(
+            question: str,
+            history_messages: list[ChatMessageResponse],
+            use_wiki_links: bool,
+        ) -> QueryResult:
+            self.assertTrue(use_wiki_links)
             captured_history.extend(history_messages)
             return QueryResult(answer="answer", sources=[], relevant_pages=[])
 

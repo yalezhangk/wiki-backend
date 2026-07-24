@@ -56,7 +56,7 @@ http://127.0.0.1:8081/docs
 - 所有 API 时间字段表示 UTC，精确到秒，当前序列化为不带 `Z` 或时区偏移的 ISO 8601 字符串，例如 `2026-07-22T10:01:08`。客户端不得按本地时区解释该字符串。
 - `source_path` 相对于 `WIKI_AGENT_REPO_PATH` 指向的 agent 仓库根目录，例如 `raw/uploads/report.md`。
 - `relevant_pages`、`created_pages`、`updated_pages`、`synthesis_path` 和 Synthesis 响应中的 `path` 都是相对于 `llm-wiki-agent/wiki` 的路径，统一使用 `/` 分隔符。
-- `sources` 是本次回答可引用的 Wiki 根目录相对路径，按检索顺序稳定去重，统一使用 `/` 分隔符并保留 `.md` 后缀。回答正文中的 `[n]` 对应 `sources[n - 1]`；无依据的陈述不应包含该标记。`relevant_pages` 仍表示检索到的扩展阅读上下文。
+- `sources` 是本次回答可引用的 Wiki 根目录相对路径，按检索顺序稳定去重，统一使用 `/` 分隔符并保留 `.md` 后缀。`POST /api/query` 正文中的 `[n]` 对应 `sources[n - 1]`；聊天回答使用实际 Wiki 页面链接。`relevant_pages` 仍表示检索到的扩展阅读上下文。
 - `POST /api/query` 保持无状态，不会隐式创建 Chat。`POST /api/ingest/jobs` 返回 `202 Accepted` 仅表示任务已入队，`succeeded` 也不表示 Quartz 已发布。
 
 以上格式是兼容现有 Quartz 客户端的 Phase B0 基线。后续只以新增字段方式增强响应，不删除现有 `sources`、`relevant_pages` 或 Ingest 字段。
@@ -99,7 +99,7 @@ Ingest 响应在保留 `status` 的同时提供 `stage`、`progress_percent` 和
 - `title` 依次来自 frontmatter、首个一级标题和文件名。
 - `kind` 支持 `source`、`entity`、`concept`、`synthesis`、`page`；未知类型回退为 `page`。
 - 当前检索层没有真实命中片段或相关度分数，因此 `excerpt`、`relevance` 返回 `null`，不生成推测值。
-- `citations` 与 `sources` 按相同顺序提供可展示的路径、标题和类型；回答正文可使用 `[n]` 定位到第 `n` 条来源。检索上下文仍单独保存在 `relevant_pages`。
+- `citations` 与 `sources` 按相同顺序提供可展示的路径、标题和类型；`POST /api/query` 回答正文可使用 `[n]` 定位到第 `n` 条来源，聊天回答使用 `[[path|title]]` 实际页面链接。检索上下文仍单独保存在 `relevant_pages`。
 - Chat 引用以 JSON 保存到 MySQL，刷新历史消息后仍可恢复；迁移前的旧消息安全回填为空列表。
 
 ### synthesis 请求示例

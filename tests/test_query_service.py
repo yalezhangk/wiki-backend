@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from app.config import settings
 from app.schemas.chat import ChatMessageResponse
 from app.schemas.query import QueryResult
 from app.services.query_service import QueryService
@@ -207,6 +208,42 @@ class QueryServiceTests(unittest.TestCase):
             [citation.title for citation in result.citations],
             ["Second", "First"],
         )
+
+    def test_run_uses_configured_main_model_token_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wiki = root / "wiki"
+            wiki.mkdir()
+            (wiki / "index.md").write_text("# Index", encoding="utf-8")
+            service = QueryService(root)
+            observed_max_tokens: list[int | None] = []
+            service._select_relevant_pages = lambda question, index: []  # type: ignore[method-assign]
+            service._call_llm_fast = lambda prompt, max_tokens=None: "[]"  # type: ignore[method-assign]
+            service._call_llm_main = lambda prompt, max_tokens=None: (  # type: ignore[method-assign]
+                observed_max_tokens.append(max_tokens) or "answer"
+            )
+
+            with patch.object(settings, "llm_main_max_tokens", 6144):
+                service.run("question")
+
+        self.assertEqual(observed_max_tokens, [6144])
+
+    def test_page_selection_uses_configured_fast_model_token_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wiki = root / "wiki"
+            wiki.mkdir()
+            service = QueryService(root)
+            observed_max_tokens: list[int | None] = []
+            service._call_llm_fast = lambda prompt, max_tokens=None: (  # type: ignore[method-assign]
+                observed_max_tokens.append(max_tokens) or "[]"
+            )
+            service._call_llm_main = lambda prompt, max_tokens=None: "answer"  # type: ignore[method-assign]
+
+            with patch.object(settings, "llm_fast_max_tokens", 768):
+                service._select_relevant_pages("question", "# Index")
+
+        self.assertEqual(observed_max_tokens, [768])
 
     def test_resolve_wiki_page_rejects_absolute_and_parent_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

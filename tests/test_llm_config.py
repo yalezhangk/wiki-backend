@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.config import settings
-from app.llm_config import LLMConfigError, _resolve_model, call_llm_fast
+from app.llm_config import LLMConfigError, LLMResponseTruncatedError, _resolve_model, call_llm_fast
 
 
 class LLMConfigTests(unittest.TestCase):
@@ -43,6 +43,23 @@ class LLMConfigTests(unittest.TestCase):
 
         with self.assertRaises(LLMConfigError):
             call_llm_fast("prompt")
+
+    @patch("app.llm_config.completion")
+    def test_length_finish_reason_is_reported_as_truncation(self, completion_mock: Mock) -> None:
+        completion_mock.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content='{"partial": "response'),
+                    finish_reason="length",
+                )
+            ]
+        )
+
+        with self.assertRaises(LLMResponseTruncatedError) as context:
+            call_llm_fast("prompt", max_tokens=1234)
+
+        self.assertEqual(context.exception.max_tokens, 1234)
+        self.assertEqual(context.exception.finish_reason, "length")
 
 
 if __name__ == "__main__":

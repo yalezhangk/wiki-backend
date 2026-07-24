@@ -55,6 +55,30 @@ class StartupDependencyTests(unittest.TestCase):
 
         self.assertEqual(settings.ingest_max_upload_bytes, 12345)
 
+    def test_ingest_llm_token_limit_uses_environment_value(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"WIKI_BACKEND_INGEST_LLM_MAX_TOKENS": "12288"},
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+
+        self.assertEqual(settings.ingest_llm_max_tokens, 12288)
+
+    def test_query_llm_token_limits_use_environment_values(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "WIKI_BACKEND_LLM_FAST_MAX_TOKENS": "768",
+                "WIKI_BACKEND_LLM_MAIN_MAX_TOKENS": "6144",
+            },
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+
+        self.assertEqual(settings.llm_fast_max_tokens, 768)
+        self.assertEqual(settings.llm_main_max_tokens, 6144)
+
     def test_services_do_not_require_agent_source_code_during_construction(self) -> None:
         missing_root = Path(tempfile.gettempdir()) / "missing-llm-wiki-agent-for-startup-test"
 

@@ -138,6 +138,7 @@ WIKI_BACKEND_MYSQL_DATABASE=wiki_backend
 WIKI_BACKEND_DEFAULT_CHAT_TITLE=新对话
 WIKI_BACKEND_CHAT_HISTORY_LIMIT=6
 WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES=52428800
+WIKI_BACKEND_INGEST_LLM_MAX_TOKENS=8192
 WIKI_BACKEND_LLM_FAST_PROVIDER=deepseek
 WIKI_BACKEND_LLM_FAST_MODEL=deepseek-v4-flash
 WIKI_BACKEND_LLM_MAIN_PROVIDER=deepseek
@@ -147,6 +148,8 @@ WIKI_BACKEND_LLM_API_BASE=
 ```
 
 真实 `.env` 不提交 Git。DGX 上使用 Linux 路径，不要写入 Windows 反斜杠路径。模型密钥只写入服务器 `.env`；不要把 `llm-wiki-agent/tools/llm_config.py` 中的本地配置或密钥复制到本项目。
+
+`WIKI_BACKEND_INGEST_LLM_MAX_TOKENS` 仅控制 Ingest 主模型的单次输出预算，默认保持兼容的 `16384`。提高该值前必须先确认所用模型支持对应上限；模型返回 `finish_reason=length` 时，任务会以可识别的截断错误失败，不会用相同 Prompt 盲目重试。
 
 ## MySQL 初始化
 

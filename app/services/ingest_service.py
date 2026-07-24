@@ -14,9 +14,10 @@ from typing import Any, Callable, Protocol
 from uuid import uuid4
 
 from fastapi import UploadFile
+from pydantic import ValidationError
 
 from app.config import settings
-from app.llm_config import call_llm_main
+from app.llm_config import LLMConfigError, LLMResponseTruncatedError, call_llm_main
 from app.prompts import load_prompt, render_prompt
 from app.schemas.ingest import IngestJobResponse, IngestLLMResult, IngestValidation
 
@@ -84,9 +85,6 @@ ZIP_REQUIRED_PREFIXES = {
     ".pptx": "ppt/",
     ".xlsx": "xl/",
 }
-MAX_INDEX_CONTEXT_CHARS = 16000
-MAX_OVERVIEW_CONTEXT_CHARS = 10000
-MAX_RECENT_SOURCE_CONTEXT_CHARS = 6000
 
 
 class IngestServiceError(RuntimeError):
@@ -103,6 +101,45 @@ class IngestConflictError(IngestServiceError):
 
 class IngestNotFoundError(IngestServiceError):
     """Raised when an ingest job cannot be found."""
+
+
+class IngestLLMResponseError(IngestServiceError):
+    """Raised when an LLM response cannot be safely used for ingest."""
+
+    def __init__(self, category: str, user_message: str) -> None:
+        self.category = category
+        self.user_message = user_message
+        super().__init__(f"{category}: {user_message}")
+
+
+class IngestLLMResponseTruncatedError(IngestLLMResponseError):
+    """Raised when the provider or JSON decoder identifies a truncated response."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "llm_response_truncated",
+            "模型输出因长度限制被截断，请调整文档或输出预算后重试。",
+        )
+
+
+class IngestLLMSchemaError(IngestLLMResponseError):
+    """Raised when JSON is complete but does not meet the ingest contract."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "llm_schema_invalid",
+            "模型返回的数据不符合入库格式，请检查服务日志后重试。",
+        )
+
+
+class IngestLLMInvalidJSONError(IngestLLMResponseError):
+    """Raised when a complete LLM response cannot be decoded as an object."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "llm_json_invalid",
+            "模型返回的入库数据不是有效 JSON，请检查服务日志后重试。",
+        )
 
 
 class IngestStorage(Protocol):
@@ -161,6 +198,7 @@ class IngestService:
         agent_root: Path,
         start_worker: bool = True,
         max_upload_bytes: int = settings.ingest_max_upload_bytes,
+        ingest_llm_max_tokens: int = settings.ingest_llm_max_tokens,
     ) -> None:
         self._storage = storage
         self._agent_root = agent_root.resolve()
@@ -170,7 +208,9 @@ class IngestService:
         self._overview_file = self._wiki_dir / "overview.md"
         self._log_file = self._wiki_dir / "log.md"
         self._call_llm_main: Callable[[str, int | None], str] | None = None
+        self._last_llm_result_raw: str | None = None
         self._max_upload_bytes = max_upload_bytes
+        self._ingest_llm_max_tokens = ingest_llm_max_tokens
         self._queue: Queue[str] = Queue()
         self._worker: threading.Thread | None = None
         if start_worker:
@@ -261,14 +301,28 @@ class IngestService:
         source_content = source.read_text(encoding="utf-8")
         prompt = self._build_prompt(source=source, source_content=source_content)
         raw = self._call_llm_with_retry(prompt)
-        data = IngestLLMResult.model_validate(
-            self._parse_llm_result_with_repair(
-                prompt=prompt,
-                raw=raw,
+        parsed = self._parse_llm_result_with_repair(
+            prompt=prompt,
+            raw=raw,
+            source_path=source_path,
+            job_id=job_id,
+        )
+        try:
+            data = IngestLLMResult.model_validate(parsed)
+        except ValidationError as exc:
+            debug_path = self._write_llm_debug_response(
                 source_path=source_path,
                 job_id=job_id,
+                label="schema",
+                content=self._last_llm_result_raw or raw,
             )
-        )
+            LOGGER.warning(
+                "LLM ingest JSON failed schema validation job_id=%s debug_path=%s",
+                job_id,
+                debug_path,
+                exc_info=True,
+            )
+            raise IngestLLMSchemaError() from exc
 
         self._update_progress(job_id, "writing_wiki", 65)
         created_pages, updated_pages, changed_knowledge_pages = self._write_ingest_result(data)
@@ -281,6 +335,7 @@ class IngestService:
             "contradictions": data.contradictions,
             "validation": validation,
         }
+
 
     def _update_progress(self, job_id: str, stage: str, progress_percent: int) -> None:
         self._storage.update_ingest_job_progress(
@@ -298,6 +353,7 @@ class IngestService:
         source_path: Path,
         job_id: str,
     ) -> dict[str, Any]:
+        self._last_llm_result_raw = raw
         try:
             return self._parse_json_from_response(raw)
         except IngestServiceError as first_error:
@@ -308,19 +364,26 @@ class IngestService:
                 content=raw,
             )
             LOGGER.warning(
-                "LLM ingest response was not valid JSON; retrying with stricter instructions. "
-                "job_id=%s debug_path=%s",
+                "LLM ingest response could not be parsed job_id=%s category=%s debug_path=%s",
                 job_id,
+                getattr(first_error, "category", "llm_json_invalid"),
                 first_debug_path,
             )
 
+            if isinstance(first_error, IngestLLMResponseTruncatedError):
+                raise
+
         repair_prompt = (
             f"{prompt}\n\n"
-            "The previous response could not be parsed as a JSON object. "
-            "Return the complete ingest result again as raw JSON only. "
+            "The response below could not be parsed as a JSON object. Repair its JSON "
+            "structure while preserving its information, then return the complete result as raw JSON only. "
             "Do not include markdown fences, explanations, apologies, analysis, or any text outside the JSON object."
+            "\n\n=== INVALID RESPONSE START ===\n"
+            f"{raw}\n"
+            "=== INVALID RESPONSE END ==="
         )
         retry_raw = self._call_llm_with_retry(repair_prompt)
+        self._last_llm_result_raw = retry_raw
         try:
             return self._parse_json_from_response(retry_raw)
         except IngestServiceError as retry_error:
@@ -330,10 +393,13 @@ class IngestService:
                 label="retry",
                 content=retry_raw,
             )
-            raise IngestServiceError(
-                "LLM response did not contain a valid ingest JSON object. "
-                f"Debug responses saved near upload: {first_debug_path}, {retry_debug_path}"
-            ) from retry_error
+            LOGGER.warning(
+                "LLM ingest repair response could not be parsed job_id=%s category=%s debug_path=%s",
+                job_id,
+                getattr(retry_error, "category", "llm_json_invalid"),
+                retry_debug_path,
+            )
+            raise IngestLLMInvalidJSONError() from retry_error
 
     def _write_ingest_result(self, data: IngestLLMResult) -> tuple[list[str], list[str], list[str]]:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", data.slug):
@@ -454,14 +520,9 @@ class IngestService:
     def _build_wiki_context(self) -> str:
         parts: list[str] = []
         if self._index_file.exists():
-            parts.append(
-                f"## wiki/index.md\n{self._clip_text(self._read_text(self._index_file), MAX_INDEX_CONTEXT_CHARS)}"
-            )
+            parts.append(f"## wiki/index.md\n{self._read_text(self._index_file)}")
         if self._overview_file.exists():
-            parts.append(
-                "## wiki/overview.md\n"
-                f"{self._clip_text(self._read_text(self._overview_file), MAX_OVERVIEW_CONTEXT_CHARS)}"
-            )
+            parts.append(f"## wiki/overview.md\n{self._read_text(self._overview_file)}")
         sources_dir = self._wiki_dir / "sources"
         if sources_dir.exists():
             recent_sources = sorted(
@@ -472,7 +533,7 @@ class IngestService:
             for path in recent_sources:
                 parts.append(
                     f"## {path.relative_to(self._agent_root).as_posix()}\n"
-                    f"{self._clip_text(self._read_text(path), MAX_RECENT_SOURCE_CONTEXT_CHARS)}"
+                    f"{self._read_text(path)}"
                 )
         return "\n\n---\n\n".join(parts)
 
@@ -560,15 +621,17 @@ class IngestService:
     def _parse_json_from_response(text: str) -> dict[str, Any]:
         sanitized = re.sub(r"^```(?:json)?\s*", "", text.strip())
         sanitized = re.sub(r"\s*```$", "", sanitized.strip())
-        match = re.search(r"\{[\s\S]*\}", sanitized)
-        if not match:
-            raise IngestServiceError("LLM response did not contain a JSON object")
+        start = sanitized.find("{")
+        if start < 0:
+            raise IngestLLMInvalidJSONError()
         try:
-            parsed = json.loads(match.group())
+            parsed, _ = json.JSONDecoder().raw_decode(sanitized[start:])
         except json.JSONDecodeError as exc:
-            raise IngestServiceError("LLM response was not valid JSON") from exc
+            if "unterminated" in exc.msg.lower() or exc.pos >= max(0, len(sanitized[start:]) - 1):
+                raise IngestLLMResponseTruncatedError() from exc
+            raise IngestLLMInvalidJSONError() from exc
         if not isinstance(parsed, dict):
-            raise IngestServiceError("LLM response JSON must be an object")
+            raise IngestLLMInvalidJSONError()
         return parsed
 
     def _write_llm_debug_response(
@@ -590,13 +653,30 @@ class IngestService:
         call_llm_main = self._get_llm_caller()
         for attempt in range(2):
             try:
-                return call_llm_main(prompt, max_tokens=8192)
-            except Exception:
-                if attempt == 1:
+                return call_llm_main(prompt, max_tokens=self._ingest_llm_max_tokens)
+            except LLMResponseTruncatedError as exc:
+                raise IngestLLMResponseTruncatedError() from exc
+            except Exception as exc:
+                if attempt == 1 or not self._is_transient_llm_error(exc):
                     raise
-                LOGGER.warning("LLM ingest generation failed; retrying once", exc_info=True)
-                time.sleep(1)
+                LOGGER.warning(
+                    "Transient LLM ingest generation failure; retrying once error_type=%s",
+                    type(exc).__name__,
+                )
+                time.sleep(0.25)
         raise RuntimeError("unreachable LLM retry state")
+
+    @staticmethod
+    def _is_transient_llm_error(exc: Exception) -> bool:
+        if isinstance(exc, (TimeoutError, ConnectionError)):
+            return True
+        if isinstance(exc, LLMConfigError):
+            return str(exc) == "LLM returned an empty response"
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code == 429 or 500 <= status_code <= 599
+        name = type(exc).__name__.lower()
+        return "timeout" in name or "connection" in name or "ratelimit" in name
 
     def _get_llm_caller(self) -> Callable[[str, int | None], str]:
         if self._call_llm_main is None:
@@ -624,13 +704,6 @@ class IngestService:
     @staticmethod
     def _read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8") if path.exists() else ""
-
-    @staticmethod
-    def _clip_text(text: str, limit: int) -> str:
-        if len(text) <= limit:
-            return text
-        clipped = text[: limit - 80].rsplit("\n", 1)[0].rstrip()
-        return f"{clipped}\n\n[context clipped to {limit} characters]"
 
     @staticmethod
     def _atomic_write(path: Path, content: str) -> None:

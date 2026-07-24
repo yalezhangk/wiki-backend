@@ -1,14 +1,27 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from litellm import completion
 
 from app.config import settings
 
+LOGGER = logging.getLogger(__name__)
+
 
 class LLMConfigError(RuntimeError):
     """Raised when the backend LLM client cannot return usable text."""
+
+
+class LLMResponseTruncatedError(LLMConfigError):
+    """Raised when the provider explicitly reports an output-length cutoff."""
+
+    def __init__(self, *, model: str, max_tokens: int, finish_reason: str) -> None:
+        self.model = model
+        self.max_tokens = max_tokens
+        self.finish_reason = finish_reason
+        super().__init__("LLM response was truncated by the provider")
 
 
 def _resolve_model(provider: str, model: str) -> str:
@@ -52,7 +65,25 @@ def call_llm(
         kwargs["api_base"] = settings.llm_api_base
 
     response = completion(**kwargs)
-    content = response.choices[0].message.content
+    try:
+        choice = response.choices[0]
+        content = choice.message.content
+    except (AttributeError, IndexError, TypeError) as exc:
+        raise LLMConfigError("LLM returned an invalid response structure") from exc
+
+    finish_reason = getattr(choice, "finish_reason", None)
+    if isinstance(finish_reason, str) and finish_reason.lower() == "length":
+        LOGGER.warning(
+            "LLM response was truncated model=%s max_tokens=%s finish_reason=%s",
+            kwargs["model"],
+            kwargs["max_tokens"],
+            finish_reason,
+        )
+        raise LLMResponseTruncatedError(
+            model=str(kwargs["model"]),
+            max_tokens=int(kwargs["max_tokens"]),
+            finish_reason=finish_reason,
+        )
     if not isinstance(content, str) or not content.strip():
         raise LLMConfigError("LLM returned an empty response")
     return content

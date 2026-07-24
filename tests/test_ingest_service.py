@@ -10,8 +10,15 @@ from unittest.mock import patch
 
 from fastapi import UploadFile
 
+from app.llm_config import LLMConfigError
 from app.schemas.ingest import IngestJobResponse, IngestValidation
-from app.services.ingest_service import IngestConflictError, IngestService, IngestValidationError
+from app.services.ingest_service import (
+    IngestConflictError,
+    IngestLLMInvalidJSONError,
+    IngestLLMResponseTruncatedError,
+    IngestService,
+    IngestValidationError,
+)
 from app.storage.mysql import MySQLStorage
 
 
@@ -232,6 +239,109 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(parsed["slug"], "report")
         self.assertTrue((source_path.parent / "report.job-1.initial.llm-response.txt").exists())
 
+    def test_parse_truncated_json_is_not_sent_to_json_repair(self) -> None:
+        source_path = self.agent_root / "raw" / "uploads" / "report.md"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("# Report", encoding="utf-8")
+        call_count = 0
+
+        def unexpected_repair(prompt: str, max_tokens: int | None = None) -> str:
+            nonlocal call_count
+            call_count += 1
+            return "{}"
+
+        self.service._call_llm_main = unexpected_repair  # type: ignore[method-assign]
+
+        with self.assertRaises(IngestLLMResponseTruncatedError):
+            self.service._parse_llm_result_with_repair(
+                prompt="prompt",
+                raw='{"title":"unfinished',
+                source_path=source_path,
+                job_id="job-truncated",
+            )
+
+        self.assertEqual(call_count, 0)
+        self.assertTrue(
+            (source_path.parent / "report.job-truncated.initial.llm-response.txt").exists()
+        )
+
+    def test_invalid_json_failure_does_not_expose_debug_paths(self) -> None:
+        source_path = self.agent_root / "raw" / "uploads" / "report.md"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("# Report", encoding="utf-8")
+        self.service._call_llm_main = lambda prompt, max_tokens=None: "still not json"  # type: ignore[method-assign]
+
+        with self.assertRaises(IngestLLMInvalidJSONError) as context:
+            self.service._parse_llm_result_with_repair(
+                prompt="prompt",
+                raw="not json",
+                source_path=source_path,
+                job_id="job-invalid",
+            )
+
+        self.assertTrue(str(context.exception).startswith("llm_json_invalid:"))
+        self.assertNotIn(".llm-response.txt", str(context.exception))
+
+    def test_llm_token_budget_is_passed_to_ingest_call(self) -> None:
+        service = IngestService(
+            storage=self.storage,
+            agent_root=self.agent_root,
+            start_worker=False,
+            ingest_llm_max_tokens=12288,
+        )
+        observed_max_tokens: list[int | None] = []
+        service._call_llm_main = lambda prompt, max_tokens=None: (  # type: ignore[method-assign]
+            observed_max_tokens.append(max_tokens) or "{}"
+        )
+
+        self.assertEqual(service._call_llm_with_retry("prompt"), "{}")
+        self.assertEqual(observed_max_tokens, [12288])
+
+    def test_empty_response_retries_once(self) -> None:
+        calls = 0
+
+        def caller(prompt: str, max_tokens: int | None = None) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise LLMConfigError("LLM returned an empty response")
+            return "{}"
+
+        self.service._call_llm_main = caller  # type: ignore[method-assign]
+        with patch("app.services.ingest_service.time.sleep"):
+            self.assertEqual(self.service._call_llm_with_retry("prompt"), "{}")
+
+        self.assertEqual(calls, 2)
+
+    def test_authentication_error_is_not_retried(self) -> None:
+        calls = 0
+
+        def caller(prompt: str, max_tokens: int | None = None) -> str:
+            nonlocal calls
+            calls += 1
+            raise PermissionError("invalid API key")
+
+        self.service._call_llm_main = caller  # type: ignore[method-assign]
+
+        with self.assertRaises(PermissionError):
+            self.service._call_llm_with_retry("prompt")
+
+        self.assertEqual(calls, 1)
+
+    def test_schema_mismatch_saves_diagnostic_and_reports_stable_error(self) -> None:
+        upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
+        job = asyncio.run(self.service.create_job(file=upload))
+        self.service._call_llm_main = lambda prompt, max_tokens=None: '{"title":"Report"}'  # type: ignore[method-assign]
+
+        self.service._run_job(job.job_id)
+
+        failed = self.storage.jobs[job.job_id]
+        self.assertTrue(failed.error.startswith("llm_schema_invalid:"))
+        upload_path = self.agent_root / job.source_path
+        self.assertTrue(
+            (upload_path.parent / f"{upload_path.stem}.{job.job_id}.schema.llm-response.txt").exists()
+        )
+
     def test_build_prompt_allows_conditional_overview_update(self) -> None:
         source = self.agent_root / "raw" / "uploads" / "report.md"
         source.parent.mkdir(parents=True)
@@ -243,14 +353,24 @@ class IngestServiceTests(unittest.TestCase):
         self.assertIn("full updated content for wiki/overview.md", prompt)
         self.assertIn("otherwise return `null`", prompt)
 
-    def test_build_wiki_context_clips_large_overview(self) -> None:
+    def test_build_wiki_context_keeps_complete_index_overview_and_recent_source(self) -> None:
+        index_path = self.agent_root / "wiki" / "index.md"
         overview_path = self.agent_root / "wiki" / "overview.md"
-        overview_path.write_text("line\n" * 4000, encoding="utf-8")
+        recent_source_path = self.agent_root / "wiki" / "sources" / "recent.md"
+        index_content = "index-start\n" + ("index-body\n" * 2000) + "index-end"
+        overview_content = "overview-start\n" + ("overview-body\n" * 2000) + "overview-end"
+        recent_source_content = "source-start\n" + ("source-body\n" * 2000) + "source-end"
+        index_path.write_text(index_content, encoding="utf-8")
+        overview_path.write_text(overview_content, encoding="utf-8")
+        recent_source_path.parent.mkdir(parents=True, exist_ok=True)
+        recent_source_path.write_text(recent_source_content, encoding="utf-8")
 
         context = self.service._build_wiki_context()
 
-        self.assertIn("[context clipped to", context)
-        self.assertLess(len(context), 12000)
+        self.assertIn(index_content, context)
+        self.assertIn(overview_content, context)
+        self.assertIn(recent_source_content, context)
+        self.assertNotIn("[context clipped to", context)
 
     def test_markdown_job_persists_real_stages_in_order(self) -> None:
         upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))

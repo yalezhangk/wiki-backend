@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Callable, Sequence, cast
 
+from app.config import settings
 from app.llm_config import call_llm_fast, call_llm_main
 from app.prompts import load_prompt, render_prompt
 from app.schemas.chat import ChatMessageResponse
@@ -146,7 +147,7 @@ class QueryService:
             answer = self._call_llm_with_retry(
                 call_llm_main,
                 prompt,
-                max_tokens=4096,
+                max_tokens=settings.llm_main_max_tokens,
                 operation="answer generation",
             )
         except Exception as exc:
@@ -182,7 +183,7 @@ class QueryService:
             raw = self._call_llm_with_retry(
                 call_llm_fast,
                 prompt,
-                max_tokens=512,
+                max_tokens=settings.llm_fast_max_tokens,
                 operation="page selection",
             )
         except Exception:

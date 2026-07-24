@@ -47,6 +47,11 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias="WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES",
     )
+    ingest_llm_max_tokens: int = Field(
+        default=8192,
+        gt=0,
+        validation_alias="WIKI_BACKEND_INGEST_LLM_MAX_TOKENS",
+    )
     llm_fast_provider: str = Field(
         default="deepseek",
         validation_alias="WIKI_BACKEND_LLM_FAST_PROVIDER",

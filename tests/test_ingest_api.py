@@ -25,7 +25,7 @@ class FakeIngestService:
                 stage="uploaded",
                 progress_percent=0,
                 original_filename="report.md",
-                source_path="raw/uploads/20260624-153012-report.md",
+                source_path="raw/uploads/report.md",
                 validation=IngestValidation(),
                 created_at=datetime(2026, 6, 24, 15, 30, 12),
                 updated_at=datetime(2026, 6, 24, 15, 30, 12),
@@ -82,7 +82,7 @@ class IngestApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
 
     def test_create_ingest_job_maps_conflict(self) -> None:
-        self.service.error = IngestConflictError("upload already exists")
+        self.service.error = IngestConflictError("上传文件已存在，请修改文件名后重试: raw/uploads/report.md")
 
         response = self.client.post(
             "/api/ingest/jobs",
@@ -90,6 +90,7 @@ class IngestApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"], "上传文件已存在，请修改文件名后重试: raw/uploads/report.md")
 
     def test_get_ingest_job_returns_job(self) -> None:
         response = self.client.get("/api/ingest/jobs/job-1")
@@ -103,7 +104,7 @@ class IngestApiTests(unittest.TestCase):
                 "stage": "uploaded",
                 "progress_percent": 0,
                 "original_filename": "report.md",
-                "source_path": "raw/uploads/20260624-153012-report.md",
+                "source_path": "raw/uploads/report.md",
                 "created_pages": [],
                 "updated_pages": [],
                 "contradictions": [],

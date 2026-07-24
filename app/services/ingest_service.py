@@ -228,11 +228,13 @@ class IngestService:
         if suffix != ".md" and not auto_convert:
             raise IngestValidationError(f"non-markdown file requires auto_convert: {suffix}")
 
-        stored_filename = f"{self._utc_now().strftime('%Y%m%d-%H%M%S')}-{self._safe_filename(original_filename)}"
+        stored_filename = self._safe_filename(original_filename)
         relative_source_path = Path("raw") / "uploads" / stored_filename
         target_path = self._agent_root / relative_source_path
         if target_path.exists():
-            raise IngestConflictError(f"upload already exists: {relative_source_path.as_posix()}")
+            raise IngestConflictError(
+                f"上传文件已存在，请修改文件名后重试: {relative_source_path.as_posix()}"
+            )
 
         self._upload_dir.mkdir(parents=True, exist_ok=True)
         await self._save_upload(file=file, target_path=target_path, suffix=suffix)
@@ -461,7 +463,9 @@ class IngestService:
                 raise IngestValidationError("file cannot be empty")
             self._validate_file_signature(target_path, suffix, header)
         except FileExistsError as exc:
-            raise IngestConflictError(f"upload already exists: {target_path.name}") from exc
+            raise IngestConflictError(
+                f"上传文件已存在，请修改文件名后重试: {target_path.name}"
+            ) from exc
         except Exception:
             try:
                 target_path.unlink(missing_ok=True)

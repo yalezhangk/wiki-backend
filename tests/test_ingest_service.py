@@ -158,7 +158,7 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(job.updated_at, job.created_at)
         self.assertEqual(job.original_filename, "report.md")
         self.assertTrue((self.agent_root / job.source_path).exists())
-        self.assertRegex(job.source_path, r"^raw/uploads/\d{8}-\d{6}-report\.md$")
+        self.assertEqual(job.source_path, "raw/uploads/report.md")
 
     def test_create_job_rejects_empty_file(self) -> None:
         upload = UploadFile(filename="empty.md", file=io.BytesIO(b""))
@@ -206,16 +206,14 @@ class IngestServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(IngestValidationError, "does not match .pdf"):
             asyncio.run(self.service.create_job(file=upload))
 
-    def test_create_job_detects_same_second_filename_conflict(self) -> None:
-        existing = self.agent_root / "raw" / "uploads" / "20260624-153012-report.md"
+    def test_create_job_detects_filename_conflict(self) -> None:
+        existing = self.agent_root / "raw" / "uploads" / "report.md"
         existing.parent.mkdir(parents=True)
         existing.write_text("old", encoding="utf-8")
         upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
 
-        with patch("app.services.ingest_service.datetime") as fake_datetime:
-            fake_datetime.utcnow.return_value = datetime(2026, 6, 24, 15, 30, 12)
-            with self.assertRaises(IngestConflictError):
-                asyncio.run(self.service.create_job(file=upload))
+        with self.assertRaisesRegex(IngestConflictError, "上传文件已存在，请修改文件名后重试"):
+            asyncio.run(self.service.create_job(file=upload))
 
     def test_parse_llm_result_retries_when_first_response_has_no_json(self) -> None:
         source_path = self.agent_root / "raw" / "uploads" / "report.pdf"

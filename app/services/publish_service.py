@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Protocol
 from app.schemas.publish import PublicationResponse, PublishJobResponse, PublishStatusResponse
 
 LOGGER = logging.getLogger(__name__)
+RELEASE_RETENTION_COUNT = 3
 
 
 class PublishNotFoundError(RuntimeError):
@@ -133,6 +135,7 @@ class PublishService:
             self._run_job(job)
 
     def _run_job(self, job: PublishJobResponse) -> None:
+        snapshot_dir: Path | None = None
         try:
             self._validate_runtime_paths()
             snapshot_dir, release_dir = self._prepare_job_directories(job.job_id)
@@ -146,7 +149,6 @@ class PublishService:
                 release_id=job.job_id,
                 finished_at=self._utc_now(),
             )
-            self._prune_releases()
             LOGGER.info("Quartz publish completed job_id=%s", job.job_id)
         except Exception as exc:
             LOGGER.exception("Quartz publish failed job_id=%s", job.job_id)
@@ -155,6 +157,10 @@ class PublishService:
                 error=self._safe_error(exc),
                 finished_at=self._utc_now(),
             )
+        finally:
+            if snapshot_dir is not None:
+                self._cleanup_snapshot_dir(snapshot_dir)
+            self._prune_releases()
 
     def _validate_runtime_paths(self) -> None:
         if not self._wiki_dir.is_dir():
@@ -164,11 +170,10 @@ class PublishService:
 
     def _prepare_job_directories(self, job_id: str) -> tuple[Path, Path]:
         root = self._quartz_root / ".publish"
-        snapshot_dir = root / "work" / job_id / "wiki"
+        # Quartz honors its repository .gitignore while globbing build input.
+        snapshot_dir = Path(tempfile.mkdtemp(prefix="wiki-backend-publish-")) / "wiki"
         release_dir = root / "releases" / job_id
-        snapshot_dir.parent.mkdir(parents=True, exist_ok=True)
         release_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.rmtree(snapshot_dir.parent, ignore_errors=True)
         shutil.rmtree(release_dir, ignore_errors=True)
         return snapshot_dir, release_dir
 
@@ -223,15 +228,52 @@ class PublishService:
             if legacy.exists() or legacy.is_symlink():
                 shutil.rmtree(legacy, ignore_errors=True)
             public.replace(legacy)
-        temporary.replace(public)
+        self._replace_public_link(temporary=temporary, public=public)
+
+    @staticmethod
+    def _replace_public_link(*, temporary: Path, public: Path) -> None:
+        if os.name != "nt" or not public.is_symlink():
+            temporary.replace(public)
+            return
+
+        previous_target = public.resolve()
+        public.unlink()
+        try:
+            temporary.replace(public)
+        except Exception:
+            if not public.exists() and not public.is_symlink():
+                public.symlink_to(previous_target, target_is_directory=True)
+            raise
 
     def _prune_releases(self) -> None:
         releases = self._quartz_root / ".publish" / "releases"
         if not releases.is_dir():
             return
-        entries = sorted((entry for entry in releases.iterdir() if entry.is_dir()), key=lambda entry: entry.stat().st_mtime, reverse=True)
-        for entry in entries[3:]:
+        entries = sorted(
+            (entry for entry in releases.iterdir() if entry.is_dir()),
+            key=lambda entry: entry.stat().st_mtime,
+            reverse=True,
+        )
+        active_release = self._active_release(releases)
+        if active_release is not None:
+            entries = [entry for entry in entries if entry != active_release]
+            retained_entries = RELEASE_RETENTION_COUNT - 1
+        else:
+            retained_entries = RELEASE_RETENTION_COUNT
+        for entry in entries[retained_entries:]:
             shutil.rmtree(entry, ignore_errors=True)
+
+    def _cleanup_snapshot_dir(self, snapshot_dir: Path) -> None:
+        shutil.rmtree(snapshot_dir.parent, ignore_errors=True)
+
+    def _active_release(self, releases: Path) -> Path | None:
+        public = self._quartz_root / "public"
+        if not public.is_symlink():
+            return None
+        active_release = public.resolve()
+        if active_release.parent == releases.resolve() and active_release.is_dir():
+            return active_release
+        return None
 
     @staticmethod
     def _safe_error(exc: Exception) -> str:

@@ -17,10 +17,18 @@ class LLMConfigError(RuntimeError):
 class LLMResponseTruncatedError(LLMConfigError):
     """Raised when the provider explicitly reports an output-length cutoff."""
 
-    def __init__(self, *, model: str, max_tokens: int, finish_reason: str) -> None:
+    def __init__(
+        self,
+        *,
+        model: str,
+        max_tokens: int,
+        finish_reason: str,
+        response_content: str | None,
+    ) -> None:
         self.model = model
         self.max_tokens = max_tokens
         self.finish_reason = finish_reason
+        self.response_content = response_content
         super().__init__("LLM response was truncated by the provider")
 
 
@@ -83,6 +91,7 @@ def call_llm(
             model=str(kwargs["model"]),
             max_tokens=int(kwargs["max_tokens"]),
             finish_reason=finish_reason,
+            response_content=content if isinstance(content, str) else None,
         )
     if not isinstance(content, str) or not content.strip():
         raise LLMConfigError("LLM returned an empty response")

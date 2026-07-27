@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from fastapi import UploadFile
 
-from app.llm_config import LLMConfigError
+from app.llm_config import LLMConfigError, LLMResponseTruncatedError
 from app.schemas.ingest import IngestJobResponse, IngestValidation
 from app.services.ingest_service import (
     IngestConflictError,
@@ -262,6 +262,30 @@ class IngestServiceTests(unittest.TestCase):
         self.assertTrue(
             (source_path.parent / "report.job-truncated.initial.llm-response.txt").exists()
         )
+
+    def test_provider_truncation_saves_partial_response_before_job_fails(self) -> None:
+        upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
+        job = asyncio.run(self.service.create_job(file=upload))
+        partial_response = '{"title":"Report","slug":"report"'
+
+        def truncated_caller(prompt: str, max_tokens: int | None = None) -> str:
+            raise LLMResponseTruncatedError(
+                model="deepseek/deepseek-v4-pro",
+                max_tokens=max_tokens or 0,
+                finish_reason="length",
+                response_content=partial_response,
+            )
+
+        self.service._call_llm_main = truncated_caller  # type: ignore[method-assign]
+
+        self.service._run_job(job.job_id)
+
+        failed = self.storage.jobs[job.job_id]
+        upload_path = self.agent_root / job.source_path
+        debug_path = upload_path.parent / f"{upload_path.stem}.{job.job_id}.truncated.llm-response.txt"
+        self.assertTrue(failed.error.startswith("llm_response_truncated:"))
+        self.assertEqual(debug_path.read_text(encoding="utf-8"), partial_response)
+        self.assertFalse((self.agent_root / "wiki" / "sources" / "report.md").exists())
 
     def test_invalid_json_failure_does_not_expose_debug_paths(self) -> None:
         source_path = self.agent_root / "raw" / "uploads" / "report.md"

@@ -116,7 +116,8 @@ class IngestLLMResponseError(IngestServiceError):
 class IngestLLMResponseTruncatedError(IngestLLMResponseError):
     """Raised when the provider or JSON decoder identifies a truncated response."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, response_content: str | None = None) -> None:
+        self.response_content = response_content
         super().__init__(
             "llm_response_truncated",
             "模型输出因长度限制被截断，请调整文档或输出预算后重试。",
@@ -312,7 +313,22 @@ class IngestService:
         self._update_progress(job_id, "extracting", 35)
         source_content = source.read_text(encoding="utf-8")
         prompt = self._build_prompt(source=source, source_content=source_content)
-        raw = self._call_llm_with_retry(prompt)
+        try:
+            raw = self._call_llm_with_retry(prompt)
+        except IngestLLMResponseTruncatedError as exc:
+            if exc.response_content:
+                debug_path = self._write_llm_debug_response(
+                    source_path=source_path,
+                    job_id=job_id,
+                    label="truncated",
+                    content=exc.response_content,
+                )
+                LOGGER.warning(
+                    "LLM ingest response was truncated job_id=%s debug_path=%s",
+                    job_id,
+                    debug_path,
+                )
+            raise
         parsed = self._parse_llm_result_with_repair(
             prompt=prompt,
             raw=raw,
@@ -670,7 +686,9 @@ class IngestService:
             try:
                 return call_llm_main(prompt, max_tokens=self._ingest_llm_max_tokens)
             except LLMResponseTruncatedError as exc:
-                raise IngestLLMResponseTruncatedError() from exc
+                raise IngestLLMResponseTruncatedError(
+                    response_content=exc.response_content,
+                ) from exc
             except Exception as exc:
                 if attempt == 1 or not self._is_transient_llm_error(exc):
                     raise

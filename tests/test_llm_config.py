@@ -60,6 +60,7 @@ class LLMConfigTests(unittest.TestCase):
 
         self.assertEqual(context.exception.max_tokens, 1234)
         self.assertEqual(context.exception.finish_reason, "length")
+        self.assertEqual(context.exception.response_content, '{"partial": "response')
 
 
 if __name__ == "__main__":

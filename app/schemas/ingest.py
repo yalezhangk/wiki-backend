@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.publish import PublicationResponse
+
 IngestJobStatus = Literal["queued", "running", "succeeded", "failed"]
 IngestStage = Literal[
     "uploaded",
@@ -66,3 +68,7 @@ class IngestJobResponse(BaseModel):
     started_at: datetime | None = Field(default=None, description="任务开始时间，UTC、秒精度。")
     updated_at: datetime = Field(description="任务状态或阶段最近更新时间，UTC、秒精度。")
     finished_at: datetime | None = Field(default=None, description="任务结束时间，UTC、秒精度。")
+    publication: PublicationResponse | None = Field(
+        default=None,
+        description="站点发布状态；仅在知识写入成功后存在。",
+    )

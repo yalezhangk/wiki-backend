@@ -114,6 +114,7 @@ class IngestApiTests(unittest.TestCase):
                 "started_at": None,
                 "updated_at": "2026-06-24T15:30:12",
                 "finished_at": None,
+                "publication": None,
             },
         )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.chats import router as chats_router
 from app.api.ingest import router as ingest_router
+from app.api.publish import router as publish_router
 from app.api.synthesis import router as synthesis_router
 from app.config import settings
 from app.logging_config import configure_logging
@@ -18,6 +20,7 @@ from app.schemas.query import QueryRequest, QueryResponse
 from app.services.chat_service import ChatService
 from app.services.chat_turn_service import ChatTurnService
 from app.services.ingest_service import IngestService
+from app.services.publish_service import PublishService
 from app.services.query_service import QueryService, QueryServiceError
 from app.services.synthesis_service import SynthesisService
 from app.storage.mysql import storage
@@ -33,6 +36,7 @@ def create_app(
     chat_turn_service: ChatTurnService | None = None,
     query_service: QueryService | None = None,
     ingest_service: IngestService | None = None,
+    publish_service: PublishService | None = None,
     synthesis_service: SynthesisService | None = None,
     initialize_storage: bool = True,
 ) -> FastAPI:
@@ -51,10 +55,28 @@ def create_app(
             app.state.chat_service = ChatService(storage)
         if not hasattr(app.state, "query_service"):
             app.state.query_service = QueryService(Path(settings.llm_wiki_repo_path))
+        if not hasattr(app.state, "wiki_lock"):
+            app.state.wiki_lock = threading.RLock()
+        if not hasattr(app.state, "publish_service"):
+            if app.state.storage_ready and app.state.initialize_storage:
+                app.state.publish_service = PublishService(
+                    storage=storage,
+                    wiki_repo_path=Path(settings.llm_wiki_repo_path),
+                    quartz_repo_path=Path(settings.quartz_repo_path),
+                    node_executable=settings.publish_node_executable,
+                    build_timeout_seconds=settings.publish_build_timeout_seconds,
+                    debounce_seconds=settings.publish_debounce_seconds,
+                    max_delay_seconds=settings.publish_max_delay_seconds,
+                    wiki_lock=app.state.wiki_lock,
+                )
+            else:
+                app.state.publish_service = None
         if not hasattr(app.state, "ingest_service"):
             app.state.ingest_service = IngestService(
                 storage=storage,
                 agent_root=Path(settings.llm_wiki_repo_path),
+                publish_service=app.state.publish_service,
+                wiki_lock=app.state.wiki_lock,
             )
         if not hasattr(app.state, "chat_turn_service"):
             app.state.chat_turn_service = ChatTurnService(
@@ -66,6 +88,8 @@ def create_app(
             app.state.synthesis_service = SynthesisService(
                 chat_service=app.state.chat_service,
                 wiki_repo_path=Path(settings.llm_wiki_repo_path),
+                publish_service=app.state.publish_service,
+                wiki_lock=app.state.wiki_lock,
             )
         LOGGER.info("wiki-backend started")
         yield
@@ -86,6 +110,8 @@ def create_app(
             "- `ingest`：上传资料并查询异步入库任务状态；入库成功不代表 Quartz 已发布。"
             "\n"
             "- `synthesis`：根据已持久化的助手消息生成 Wiki Synthesis，不接收回答正文。"
+            "\n\n"
+            "- `publish`：异步构建 Quartz 静态站点；入库成功不等于页面已发布。"
         ),
         lifespan=lifespan,
     )
@@ -125,6 +151,8 @@ def create_app(
         app.state.query_service = query_service
     if ingest_service is not None:
         app.state.ingest_service = ingest_service
+    if publish_service is not None:
+        app.state.publish_service = publish_service
     if chat_turn_service is not None:
         app.state.chat_turn_service = chat_turn_service
     if synthesis_service is not None:
@@ -177,6 +205,7 @@ def create_app(
 
     app.include_router(chats_router)
     app.include_router(ingest_router)
+    app.include_router(publish_router)
     app.include_router(synthesis_router)
     return app
 

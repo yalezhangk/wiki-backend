@@ -20,6 +20,7 @@ from app.config import settings
 from app.llm_config import LLMConfigError, LLMResponseTruncatedError, call_llm_main
 from app.prompts import load_prompt, render_prompt
 from app.schemas.ingest import IngestJobResponse, IngestLLMResult, IngestValidation
+from app.services.publish_service import PublishService
 
 LOGGER = logging.getLogger(__name__)
 
@@ -197,6 +198,8 @@ class IngestService:
         storage: IngestStorage,
         agent_root: Path,
         start_worker: bool = True,
+        publish_service: PublishService | None = None,
+        wiki_lock: Any | None = None,
         max_upload_bytes: int = settings.ingest_max_upload_bytes,
         ingest_llm_max_tokens: int = settings.ingest_llm_max_tokens,
     ) -> None:
@@ -211,6 +214,8 @@ class IngestService:
         self._last_llm_result_raw: str | None = None
         self._max_upload_bytes = max_upload_bytes
         self._ingest_llm_max_tokens = ingest_llm_max_tokens
+        self._publish_service = publish_service
+        self._wiki_lock = wiki_lock or threading.RLock()
         self._queue: Queue[str] = Queue()
         self._worker: threading.Thread | None = None
         if start_worker:
@@ -285,6 +290,11 @@ class IngestService:
                 validation=result["validation"],
                 finished_at=self._utc_now(),
             )
+            if self._publish_service is not None:
+                try:
+                    self._publish_service.queue_change(source_kind="ingest", source_id=job_id)
+                except Exception:
+                    LOGGER.exception("Failed to queue Quartz publish after ingest job_id=%s", job_id)
         except Exception as exc:
             LOGGER.exception("Ingest job failed job_id=%s", job_id)
             self._storage.mark_ingest_job_failed(
@@ -327,7 +337,8 @@ class IngestService:
             raise IngestLLMSchemaError() from exc
 
         self._update_progress(job_id, "writing_wiki", 65)
-        created_pages, updated_pages, changed_knowledge_pages = self._write_ingest_result(data)
+        with self._wiki_lock:
+            created_pages, updated_pages, changed_knowledge_pages = self._write_ingest_result(data)
         self._update_progress(job_id, "validating", 85)
         validation = self._validate_ingest(changed_knowledge_pages)
 

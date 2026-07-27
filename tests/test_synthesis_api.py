@@ -74,6 +74,7 @@ class SynthesisApiTests(unittest.TestCase):
                 "title": "自定义标题",
                 "path": "syntheses/auto.md",
                 "created_at": "2026-06-22T00:00:00",
+                "publication": None,
             },
         )
         self.assertEqual(

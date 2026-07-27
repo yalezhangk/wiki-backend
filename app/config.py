@@ -52,6 +52,29 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias="WIKI_BACKEND_INGEST_LLM_MAX_TOKENS",
     )
+    quartz_repo_path: Path = Field(
+        default=(PROJECT_ROOT.parent / "quartz").resolve(),
+        validation_alias="WIKI_BACKEND_QUARTZ_REPO_PATH",
+    )
+    publish_node_executable: str = Field(
+        default="node",
+        validation_alias="WIKI_BACKEND_PUBLISH_NODE_EXECUTABLE",
+    )
+    publish_build_timeout_seconds: int = Field(
+        default=900,
+        gt=0,
+        validation_alias="WIKI_BACKEND_PUBLISH_BUILD_TIMEOUT_SECONDS",
+    )
+    publish_debounce_seconds: int = Field(
+        default=120,
+        ge=0,
+        validation_alias="WIKI_BACKEND_PUBLISH_DEBOUNCE_SECONDS",
+    )
+    publish_max_delay_seconds: int = Field(
+        default=600,
+        gt=0,
+        validation_alias="WIKI_BACKEND_PUBLISH_MAX_DELAY_SECONDS",
+    )
     llm_fast_provider: str = Field(
         default="deepseek",
         validation_alias="WIKI_BACKEND_LLM_FAST_PROVIDER",

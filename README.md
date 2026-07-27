@@ -8,7 +8,7 @@
 - `wiki-backend`：独立实现 HTTP query、ingest、聊天编排、任务状态、数据库持久化和 synthesis 写入。
 - `quartz`：读取 Wiki Markdown，构建静态 UI，并通过同源 `/api` 调用本服务。
 
-`wiki-backend` 不负责直接提供 Quartz 静态页面，也不负责在 ingest 完成后自动重建 `quartz/public/`。当前流程中，Wiki 文件变化后仍需单独执行 Quartz 构建。
+`wiki-backend` 不直接提供 Quartz 静态页面；它会在 ingest 或 synthesis 成功后编排 Quartz 构建，并由 DGX Nginx 继续从 `quartz/public/` 提供静态页面。
 
 后端只共享 `llm-wiki-agent` 的 `wiki/`、`raw/` 和 `graph/` 数据，不导入其 Python 源码。LLM 调用配置位于 `app/llm_config.py`，query 和 ingest 使用的 Agent Prompt 固化在 `app/prompts/agent_instructions.md`。该 Prompt 只同步自 `llm-wiki-agent/AGENTS.md`，不使用 `CLAUDE.md`。
 
@@ -42,6 +42,9 @@ ECS Nginx :8080
 - `GET /api/ingest/jobs`：列出入库任务。
 - `GET /api/ingest/jobs/{job_id}`：读取任务详情。
 - `POST /api/synthesis`：将已持久化的助手回答保存为 Wiki synthesis。
+- `GET /api/publish/status`：读取待发布变更、当前构建和最近成功发布。
+- `POST /api/publish/jobs`：立即构建并发布当前 Wiki。
+- `GET /api/publish/jobs*`：读取发布任务历史与详情。
 
 服务启动后可查看 FastAPI 文档：
 
@@ -58,6 +61,7 @@ http://127.0.0.1:8081/docs
 - `relevant_pages`、`created_pages`、`updated_pages`、`synthesis_path` 和 Synthesis 响应中的 `path` 都是相对于 `llm-wiki-agent/wiki` 的路径，统一使用 `/` 分隔符。
 - `sources` 是本次回答可引用的 Wiki 根目录相对路径，按检索顺序稳定去重，统一使用 `/` 分隔符并保留 `.md` 后缀。`POST /api/query` 正文中的 `[n]` 对应 `sources[n - 1]`；聊天回答使用实际 Wiki 页面链接。`relevant_pages` 仍表示检索到的扩展阅读上下文。
 - `POST /api/query` 保持无状态，不会隐式创建 Chat。`POST /api/ingest/jobs` 返回 `202 Accepted` 仅表示任务已入队，`succeeded` 也不表示 Quartz 已发布。
+- 成功的 ingest 与 synthesis 响应可额外包含 `publication`：`pending`、`running`、`published` 或 `failed`。这不改变原有 ingest 状态机。
 
 以上格式是兼容现有 Quartz 客户端的 Phase B0 基线。后续只以新增字段方式增强响应，不删除现有 `sources`、`relevant_pages` 或 Ingest 字段。
 
@@ -424,14 +428,12 @@ WIKI_BACKEND_RUN_MYSQL_INTEGRATION=1 \
 - 当前 API 不应被视为已经具备完整公网身份认证；对外开放写接口时，应在 ECS 入口配置 HTTPS、访问控制、速率限制和日志审计。
 - 上传大小、类型、耗时和并发限制要同时考虑 Nginx 与应用层，不能只依赖前端校验。
 
-## 发布后的 Quartz 更新
+## Quartz 自动发布
 
-ingest 或 synthesis 可能修改 `llm-wiki-agent/wiki`。这些变化不会自动更新 Quartz 已生成的 `public/`。当前发布步骤是：
+ingest 或 synthesis 成功写入 Wiki 后，会加入同一个 Quartz 发布批次。默认静默合并 120 秒，连续变更最长等待 600 秒；`POST /api/publish/jobs` 可提前执行当前批次或重建当前 Wiki。
 
-```bash
-cd /home/dgx/Projects/knowledge_base_mkt/quartz
-CHAT_PROXY_URL=/api npx quartz build \
-  -d /home/dgx/Projects/knowledge_base_mkt/llm-wiki-agent/wiki
-```
+发布服务将 Wiki 复制为快照，再执行 Quartz build 到 `quartz/.publish/releases/<job-id>`。验证成功后才原子替换 `quartz/public` 链接；失败时旧站点保持可用。每次发布最多保留最近三版成功构建，不需要 reload DGX Nginx。
 
-构建完成后验证 DGX 页面，并根据需要等待或清理 ECS 短缓存。
+DGX 上 `wiki-backend` 的运行用户必须同时拥有 `llm-wiki-agent/wiki` 读取权限、`quartz/.publish` 写权限和 `quartz/public` 链接切换权限，并且能执行配置的 Node.js。ECS 静态页与 `contentIndex.json` 仍可能在短缓存到期后才可见。
+
+`/api/publish/` 是会启动构建子进程的写接口。DGX 与 ECS Nginx 都必须为它单独设置 Basic Auth、限流、`proxy_cache off`，且保持 `proxy_pass http://127.0.0.1:8081;` 不带尾部 `/`。若在公网 HTTP 上使用 Basic Auth，凭据会明文传输；应尽快迁移 HTTPS，认证文件和密码不得提交到 Git。

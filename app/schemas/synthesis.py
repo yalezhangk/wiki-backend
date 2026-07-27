@@ -5,6 +5,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field, StringConstraints
 
+from app.schemas.publish import PublicationResponse
+
 SynthesisTitle = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
 
 
@@ -25,3 +27,7 @@ class SynthesisResponse(BaseModel):
     title: str = Field(description="Synthesis 标题。")
     path: str = Field(description="Synthesis Markdown 的 Wiki 相对路径。")
     created_at: datetime = Field(description="保存时间，UTC、秒精度。")
+    publication: PublicationResponse | None = Field(
+        default=None,
+        description="站点发布状态。",
+    )

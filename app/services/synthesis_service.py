@@ -10,6 +10,7 @@ from tempfile import NamedTemporaryFile
 from app.schemas.chat import ChatMessageResponse
 from app.schemas.synthesis import SynthesisResponse
 from app.services.chat_service import ChatService
+from app.services.publish_service import PublishService
 from app.storage.mysql import StorageError
 
 LOGGER = logging.getLogger(__name__)
@@ -40,13 +41,20 @@ class SynthesisWriteError(SynthesisServiceError):
 
 
 class SynthesisService:
-    def __init__(self, chat_service: ChatService, wiki_repo_path: Path) -> None:
+    def __init__(
+        self,
+        chat_service: ChatService,
+        wiki_repo_path: Path,
+        publish_service: PublishService | None = None,
+        wiki_lock: object | None = None,
+    ) -> None:
         self._chat_service = chat_service
         self._wiki_root = wiki_repo_path / "wiki"
         self._syntheses_dir = self._wiki_root / "syntheses"
         self._index_path = self._wiki_root / "index.md"
         self._log_path = self._wiki_root / "log.md"
-        self._lock = threading.Lock()
+        self._publish_service = publish_service
+        self._lock = wiki_lock or threading.RLock()
 
     def save_chat_answer(
         self,
@@ -90,6 +98,19 @@ class SynthesisService:
                 created_at=created_at,
             )
 
+        publication = None
+        if self._publish_service is not None:
+            try:
+                self._publish_service.queue_change(
+                    source_kind="synthesis",
+                    source_id=str(assistant_message_id),
+                )
+                publication = self._publish_service.get_publication(
+                    source_kind="synthesis",
+                    source_id=str(assistant_message_id),
+                )
+            except Exception:
+                LOGGER.exception("Failed to queue Quartz publish after synthesis message_id=%s", assistant_message_id)
         return SynthesisResponse(
             chat_id=chat_id,
             assistant_message_id=assistant_message_id,
@@ -97,6 +118,7 @@ class SynthesisService:
             title=synthesis_title,
             path=relative_path.as_posix(),
             created_at=created_at,
+            publication=publication,
         )
 
     def _write_with_compensation(

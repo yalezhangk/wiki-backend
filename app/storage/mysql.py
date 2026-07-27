@@ -10,6 +10,7 @@ from app.config import settings
 from app.schemas.chat import ChatMessageResponse, ChatResponse
 from app.schemas.ingest import IngestJobResponse, IngestValidation
 from app.schemas.query import CitationResponse
+from app.schemas.publish import PublicationResponse, PublishJobResponse, PublishStatusResponse
 
 
 class StorageError(RuntimeError):
@@ -97,6 +98,38 @@ class MySQLStorage:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """
                 )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS publish_jobs (
+                        id CHAR(36) PRIMARY KEY,
+                        status VARCHAR(16) NOT NULL,
+                        trigger_kind VARCHAR(16) NOT NULL,
+                        scheduled_at DATETIME NOT NULL,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        started_at DATETIME NULL,
+                        finished_at DATETIME NULL,
+                        published_at DATETIME NULL,
+                        release_id VARCHAR(64) NULL,
+                        error TEXT NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS publish_changes (
+                        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                        source_kind VARCHAR(16) NOT NULL,
+                        source_id VARCHAR(64) NOT NULL,
+                        publish_job_id CHAR(36) NULL,
+                        state VARCHAR(16) NOT NULL,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        INDEX idx_publish_changes_job (publish_job_id),
+                        INDEX idx_publish_changes_source (source_kind, source_id, id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
                 self._ensure_ingest_progress_columns(cursor)
                 self._ensure_message_citations_column(cursor)
                 self._apply_schema_comments(cursor)
@@ -109,6 +142,7 @@ class MySQLStorage:
                     "chat_id, created_at",
                 )
                 self._ensure_index(cursor, "ingest_jobs", "idx_ingest_jobs_created_at", "created_at DESC")
+                self._ensure_index(cursor, "publish_jobs", "idx_publish_jobs_schedule", "status, scheduled_at")
 
     @contextmanager
     def connect(self) -> Iterator[Any]:
@@ -450,7 +484,8 @@ class MySQLStorage:
         rows = self._fetch_all("SELECT * FROM ingest_jobs WHERE id = %s", (job_id,))
         if not rows:
             return None
-        return self._ingest_job_from_row(rows[0])
+        job = self._ingest_job_from_row(rows[0])
+        return job.model_copy(update={"publication": self.get_publication(source_kind="ingest", source_id=job_id)})
 
     def list_ingest_jobs(self, limit: int) -> list[IngestJobResponse]:
         rows = self._fetch_all(
@@ -462,7 +497,10 @@ class MySQLStorage:
             """,
             (limit,),
         )
-        return [self._ingest_job_from_row(row) for row in rows]
+        return [
+            job.model_copy(update={"publication": self.get_publication(source_kind="ingest", source_id=job.job_id)})
+            for job in (self._ingest_job_from_row(row) for row in rows)
+        ]
 
     def mark_ingest_job_running(self, job_id: str, started_at: datetime) -> None:
         self._execute_update(
@@ -535,6 +573,219 @@ class MySQLStorage:
             WHERE id = %s
             """,
             (error, finished_at, finished_at, job_id),
+        )
+
+    def queue_publish_change(
+        self,
+        *,
+        source_kind: str,
+        source_id: str,
+        scheduled_at: datetime,
+        max_scheduled_at: datetime,
+        now: datetime,
+    ) -> PublishJobResponse:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM publish_jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1 FOR UPDATE"
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    job_id = str(uuid4())
+                    cursor.execute(
+                        """
+                        INSERT INTO publish_jobs (
+                            id, status, trigger_kind, scheduled_at, created_at, updated_at
+                        ) VALUES (%s, 'queued', 'automatic', %s, %s, %s)
+                        """,
+                        (job_id, scheduled_at, now, now),
+                    )
+                else:
+                    job_id = str(row["id"])
+                    max_delay = max_scheduled_at - now
+                    deadline = row["created_at"] + max_delay
+                    effective_schedule = min(scheduled_at, deadline)
+                    cursor.execute(
+                        "UPDATE publish_jobs SET scheduled_at = %s, updated_at = %s WHERE id = %s",
+                        (effective_schedule, now, job_id),
+                    )
+                cursor.execute(
+                    """
+                    INSERT INTO publish_changes (
+                        source_kind, source_id, publish_job_id, state, created_at, updated_at
+                    ) VALUES (%s, %s, %s, 'pending', %s, %s)
+                    """,
+                    (source_kind, source_id, job_id, now, now),
+                )
+        return self.get_publish_job(job_id) or self._raise_missing_publish_job(job_id)
+
+    def request_manual_publish(self, *, now: datetime) -> PublishJobResponse:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM publish_jobs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
+                )
+                running = cursor.fetchone()
+                if running is not None:
+                    job_id = str(running["id"])
+                else:
+                    cursor.execute(
+                        "SELECT * FROM publish_jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1 FOR UPDATE"
+                    )
+                    queued = cursor.fetchone()
+                    if queued is not None:
+                        job_id = str(queued["id"])
+                        cursor.execute(
+                            """
+                            UPDATE publish_jobs
+                            SET trigger_kind = 'manual', scheduled_at = %s, updated_at = %s
+                            WHERE id = %s
+                            """,
+                            (now, now, job_id),
+                        )
+                    else:
+                        job_id = str(uuid4())
+                        cursor.execute(
+                            """
+                            INSERT INTO publish_jobs (
+                                id, status, trigger_kind, scheduled_at, created_at, updated_at
+                            ) VALUES (%s, 'queued', 'manual', %s, %s, %s)
+                            """,
+                            (job_id, now, now, now),
+                        )
+                        cursor.execute(
+                            """
+                            UPDATE publish_changes
+                            SET publish_job_id = %s, state = 'pending', updated_at = %s
+                            WHERE state = 'failed'
+                            """,
+                            (job_id, now),
+                        )
+        return self.get_publish_job(job_id) or self._raise_missing_publish_job(job_id)
+
+    def claim_due_publish_job(self, *, now: datetime) -> PublishJobResponse | None:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT * FROM publish_jobs
+                    WHERE status = 'queued' AND scheduled_at <= %s
+                    ORDER BY scheduled_at ASC
+                    LIMIT 1 FOR UPDATE
+                    """,
+                    (now,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                job_id = str(row["id"])
+                cursor.execute(
+                    "UPDATE publish_jobs SET status = 'running', started_at = %s, updated_at = %s WHERE id = %s",
+                    (now, now, job_id),
+                )
+                cursor.execute(
+                    "UPDATE publish_changes SET state = 'running', updated_at = %s WHERE publish_job_id = %s AND state = 'pending'",
+                    (now, job_id),
+                )
+        return self.get_publish_job(job_id)
+
+    def mark_publish_job_succeeded(self, *, job_id: str, release_id: str, finished_at: datetime) -> None:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE publish_jobs
+                    SET status = 'succeeded', release_id = %s, published_at = %s,
+                        finished_at = %s, updated_at = %s, error = NULL
+                    WHERE id = %s
+                    """,
+                    (release_id, finished_at, finished_at, finished_at, job_id),
+                )
+                cursor.execute(
+                    "UPDATE publish_changes SET state = 'published', updated_at = %s WHERE publish_job_id = %s",
+                    (finished_at, job_id),
+                )
+
+    def mark_publish_job_failed(self, *, job_id: str, error: str, finished_at: datetime) -> None:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE publish_jobs
+                    SET status = 'failed', error = %s, finished_at = %s, updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (error, finished_at, finished_at, job_id),
+                )
+                cursor.execute(
+                    "UPDATE publish_changes SET state = 'failed', updated_at = %s WHERE publish_job_id = %s",
+                    (finished_at, job_id),
+                )
+
+    def recover_publish_jobs(self, *, now: datetime) -> None:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE publish_jobs SET status = 'failed', error = 'publish worker restarted', finished_at = %s, updated_at = %s WHERE status = 'running'",
+                    (now, now),
+                )
+                cursor.execute(
+                    "UPDATE publish_changes SET state = 'pending', publish_job_id = NULL, updated_at = %s WHERE state = 'running'",
+                    (now,),
+                )
+                cursor.execute("SELECT id FROM publish_changes WHERE state = 'pending' LIMIT 1")
+                if cursor.fetchone() is None:
+                    return
+                cursor.execute("SELECT id FROM publish_jobs WHERE status = 'queued' LIMIT 1")
+                if cursor.fetchone() is not None:
+                    return
+                job_id = str(uuid4())
+                cursor.execute(
+                    "INSERT INTO publish_jobs (id, status, trigger_kind, scheduled_at, created_at, updated_at) VALUES (%s, 'queued', 'automatic', %s, %s, %s)",
+                    (job_id, now, now, now),
+                )
+                cursor.execute(
+                    "UPDATE publish_changes SET publish_job_id = %s, updated_at = %s WHERE state = 'pending' AND publish_job_id IS NULL",
+                    (job_id, now),
+                )
+
+    def get_publish_job(self, job_id: str) -> PublishJobResponse | None:
+        rows = self._fetch_all(self._publish_job_select("WHERE p.id = %s"), (job_id,))
+        return self._publish_job_from_row(rows[0]) if rows else None
+
+    def list_publish_jobs(self, limit: int) -> list[PublishJobResponse]:
+        rows = self._fetch_all(self._publish_job_select("ORDER BY p.created_at DESC LIMIT %s"), (limit,))
+        return [self._publish_job_from_row(row) for row in rows]
+
+    def get_publish_status(self) -> PublishStatusResponse:
+        pending_rows = self._fetch_all("SELECT COUNT(*) AS count FROM publish_changes WHERE state IN ('pending', 'running')")
+        active_rows = self._fetch_all(self._publish_job_select("WHERE p.status IN ('queued', 'running') ORDER BY p.created_at ASC LIMIT 1"))
+        successful_rows = self._fetch_all(self._publish_job_select("WHERE p.status = 'succeeded' ORDER BY p.published_at DESC LIMIT 1"))
+        return PublishStatusResponse(
+            pending_change_count=int(pending_rows[0]["count"]),
+            active_job=self._publish_job_from_row(active_rows[0]) if active_rows else None,
+            last_successful_job=self._publish_job_from_row(successful_rows[0]) if successful_rows else None,
+        )
+
+    def get_publication(self, *, source_kind: str, source_id: str) -> PublicationResponse | None:
+        rows = self._fetch_all(
+            """
+            SELECT c.state, c.publish_job_id, p.published_at, p.error
+            FROM publish_changes AS c
+            LEFT JOIN publish_jobs AS p ON p.id = c.publish_job_id
+            WHERE c.source_kind = %s AND c.source_id = %s
+            ORDER BY c.id DESC LIMIT 1
+            """,
+            (source_kind, source_id),
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        return PublicationResponse(
+            status=row["state"],
+            job_id=row.get("publish_job_id"),
+            published_at=row.get("published_at"),
+            error=row.get("error") if row["state"] == "failed" else None,
         )
 
     def update_chat_activity(
@@ -874,6 +1125,35 @@ class MySQLStorage:
             started_at=row.get("started_at"),
             updated_at=row.get("updated_at") or row["created_at"],
             finished_at=row.get("finished_at"),
+        )
+
+    @staticmethod
+    def _publish_job_select(suffix: str) -> str:
+        return """
+            SELECT p.*, (
+                SELECT COUNT(*) FROM publish_changes AS c WHERE c.publish_job_id = p.id
+            ) AS change_count
+            FROM publish_jobs AS p
+        """ + suffix
+
+    @staticmethod
+    def _raise_missing_publish_job(job_id: str) -> PublishJobResponse:
+        raise StorageError(f"Failed to reload publish job: {job_id}")
+
+    @staticmethod
+    def _publish_job_from_row(row: dict[str, Any]) -> PublishJobResponse:
+        return PublishJobResponse(
+            job_id=str(row["id"]),
+            status=row["status"],
+            trigger=row["trigger_kind"],
+            change_count=int(row.get("change_count", 0)),
+            scheduled_at=row["scheduled_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            started_at=row.get("started_at"),
+            finished_at=row.get("finished_at"),
+            published_at=row.get("published_at"),
+            error=row.get("error"),
         )
 
     @staticmethod

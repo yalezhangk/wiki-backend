@@ -1,0 +1,16 @@
+# 在 DGX 与 ECS 对应的 server 中增加；认证文件和真实用户名不进入 Git。
+# 两端均需在 http 块定义 limit_req_zone $binary_remote_addr zone=wiki_publish:10m rate=3r/m;
+# DGX 使用下列 proxy_pass；ECS 需改为既有的 llm_wiki_dgx upstream（127.0.0.1:18080）。
+location ^~ /api/publish/ {
+    auth_basic "Wiki publish";
+    auth_basic_user_file /etc/nginx/htpasswd/wiki-publish;
+    limit_req zone=wiki_publish burst=2 nodelay;
+
+    proxy_pass http://127.0.0.1:8081;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_cache off;
+    add_header X-Cache-Status "BYPASS" always;
+}
+
+# Basic Auth 在 HTTP 上传输凭据会明文可见。公网使用前应迁移 HTTPS。

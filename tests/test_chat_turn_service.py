@@ -25,7 +25,7 @@ class FakeSchemaCursor:
 class FakeStorage:
     def __init__(self) -> None:
         self.chat = ChatResponse(
-            id="chat-1",
+            id=1,
             title="新对话",
             status="active",
             created_at=datetime(2026, 6, 17, tzinfo=timezone.utc),
@@ -43,23 +43,23 @@ class FakeStorage:
         self.chat = self.chat.model_copy(update={"title": title})
         return self.chat
 
-    def get_chat(self, chat_id: str) -> ChatResponse | None:
+    def get_chat(self, chat_id: int) -> ChatResponse | None:
         return self.chat if chat_id == self.chat.id else None
 
-    def rename_chat(self, chat_id: str, title: str) -> ChatResponse:
+    def rename_chat(self, chat_id: int, title: str) -> ChatResponse:
         if chat_id != self.chat.id:
             raise ChatNotFoundError(chat_id)
         self.chat = self.chat.model_copy(update={"title": title})
         return self.chat
 
-    def list_messages(self, chat_id: str) -> list[ChatMessageResponse]:
+    def list_messages(self, chat_id: int) -> list[ChatMessageResponse]:
         if chat_id != self.chat.id:
             raise ChatNotFoundError(chat_id)
         return list(self.messages)
 
     def list_recent_messages(
         self,
-        chat_id: str,
+        chat_id: int,
         limit: int,
         before_message_id: int | None = None,
     ) -> list[ChatMessageResponse]:
@@ -70,14 +70,14 @@ class FakeStorage:
             filtered = [message for message in filtered if message.id < before_message_id]
         return filtered[-limit:]
 
-    def count_messages(self, chat_id: str) -> int:
+    def count_messages(self, chat_id: int) -> int:
         if chat_id != self.chat.id:
             raise ChatNotFoundError(chat_id)
         return len(self.messages)
 
     def create_message(
         self,
-        chat_id: str,
+        chat_id: int,
         role: str,
         content: str,
         sources: list[str] | None = None,
@@ -103,7 +103,7 @@ class FakeStorage:
 
     def update_chat_activity(
         self,
-        chat_id: str,
+        chat_id: int,
         updated_at: datetime,
         last_message_at: datetime | None,
     ) -> ChatResponse:
@@ -158,7 +158,7 @@ class ChatTurnServiceTests(unittest.TestCase):
         )
 
     def test_first_turn_saves_messages_and_auto_renames_chat(self) -> None:
-        response = self.service.run_turn("chat-1", "这是第一条问题，需要自动命名标题")
+        response = self.service.run_turn(1, "这是第一条问题，需要自动命名标题")
 
         self.assertEqual(response.user_message.role, "user")
         self.assertEqual(response.assistant_message.role, "assistant")
@@ -184,7 +184,7 @@ value = 1
 ```  """
         self.query_service.answer = markdown
 
-        response = self.service.run_turn("chat-1", question)
+        response = self.service.run_turn(1, question)
 
         self.assertEqual(response.user_message.content, "第一行\n  第二行")
         self.assertEqual(response.assistant_message.content, markdown.strip())
@@ -194,9 +194,9 @@ value = 1
     def test_second_turn_uses_recent_history_only(self) -> None:
         for index in range(8):
             role = "user" if index % 2 == 0 else "assistant"
-            self.storage.create_message("chat-1", role=role, content=f"message-{index}")
+            self.storage.create_message(1, role=role, content=f"message-{index}")
 
-        self.service.run_turn("chat-1", "follow-up question")
+        self.service.run_turn(1, "follow-up question")
 
         self.assertEqual(self.query_service.last_question, "follow-up question")
         self.assertEqual(len(self.query_service.last_history), 6)
@@ -209,7 +209,7 @@ value = 1
         self.query_service.should_fail = True
 
         with self.assertRaises(QueryServiceError):
-            self.service.run_turn("chat-1", "will fail")
+            self.service.run_turn(1, "will fail")
 
         self.assertEqual(len(self.storage.messages), 1)
         self.assertEqual(self.storage.messages[0].role, "user")
@@ -229,7 +229,7 @@ value = 1
         message = storage._message_from_row(
             {
                 "id": 1,
-                "chat_id": "chat-1",
+                "chat_id": 1,
                 "role": "assistant",
                 "content": "answer",
                 "sources": "[]",

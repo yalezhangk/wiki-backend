@@ -39,17 +39,17 @@ class PublishStorage(Protocol):
         ...
 
     def mark_publish_job_succeeded(
-        self, *, job_id: str, release_id: str, finished_at: datetime
+        self, *, job_id: int, release_id: str, finished_at: datetime
     ) -> None:
         ...
 
-    def mark_publish_job_failed(self, *, job_id: str, error: str, finished_at: datetime) -> None:
+    def mark_publish_job_failed(self, *, job_id: int, error: str, finished_at: datetime) -> None:
         ...
 
     def recover_publish_jobs(self, *, now: datetime) -> None:
         ...
 
-    def get_publish_job(self, job_id: str) -> PublishJobResponse | None:
+    def get_publish_job(self, job_id: int) -> PublishJobResponse | None:
         ...
 
     def list_publish_jobs(self, limit: int) -> list[PublishJobResponse]:
@@ -116,7 +116,7 @@ class PublishService:
     def get_status(self) -> PublishStatusResponse:
         return self._storage.get_publish_status()
 
-    def get_job(self, job_id: str) -> PublishJobResponse:
+    def get_job(self, job_id: int) -> PublishJobResponse:
         job = self._storage.get_publish_job(job_id)
         if job is None:
             raise PublishNotFoundError(job_id)
@@ -146,7 +146,7 @@ class PublishService:
             self._activate_release(release_dir)
             self._storage.mark_publish_job_succeeded(
                 job_id=job.job_id,
-                release_id=job.job_id,
+                release_id=str(job.job_id),
                 finished_at=self._utc_now(),
             )
             LOGGER.info("Quartz publish completed job_id=%s", job.job_id)
@@ -168,11 +168,11 @@ class PublishService:
         if not (self._quartz_root / "quartz" / "bootstrap-cli.mjs").is_file():
             raise RuntimeError("Quartz build entrypoint is unavailable")
 
-    def _prepare_job_directories(self, job_id: str) -> tuple[Path, Path]:
+    def _prepare_job_directories(self, job_id: int) -> tuple[Path, Path]:
         root = self._quartz_root / ".publish"
         # Quartz honors its repository .gitignore while globbing build input.
         snapshot_dir = Path(tempfile.mkdtemp(prefix="wiki-backend-publish-")) / "wiki"
-        release_dir = root / "releases" / job_id
+        release_dir = root / "releases" / str(job_id)
         release_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.rmtree(release_dir, ignore_errors=True)
         return snapshot_dir, release_dir

@@ -34,7 +34,7 @@ class ChatRenameRequest(BaseModel):
 class ChatResponse(BaseModel):
     """聊天会话摘要信息。"""
 
-    id: str = Field(description="聊天会话 ID。")
+    id: int = Field(gt=0, description="聊天会话数字 ID。")
     title: str = Field(description="聊天会话标题。")
     status: str = Field(description="会话状态。当前实现通常为 active。")
     created_at: datetime = Field(description="会话创建时间，UTC、秒精度。")
@@ -59,7 +59,7 @@ class ChatMessageResponse(BaseModel):
     """单条聊天消息。"""
 
     id: int = Field(description="消息 ID。")
-    chat_id: str = Field(description="所属聊天会话 ID。")
+    chat_id: int = Field(gt=0, description="所属聊天会话数字 ID。")
     role: Literal["user", "assistant"] = Field(description="消息角色，`user` 表示用户，`assistant` 表示助手。")
     content: str = Field(description="消息正文内容。")
     sources: list[str] = Field(

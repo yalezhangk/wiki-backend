@@ -4,7 +4,6 @@ import json
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Iterator
-from uuid import uuid4
 
 from app.config import settings
 from app.schemas.chat import ChatMessageResponse, ChatResponse
@@ -46,7 +45,7 @@ class MySQLStorage:
                 cursor.execute(
                     """
                     CREATE TABLE IF NOT EXISTS chats (
-                        id CHAR(36) PRIMARY KEY COMMENT '会话唯一标识（UUID）',
+                        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT COMMENT '会话数字自增主键',
                         title VARCHAR(200) NOT NULL COMMENT '会话标题',
                         status VARCHAR(32) NOT NULL DEFAULT 'active' COMMENT '会话状态',
                         created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
@@ -60,7 +59,7 @@ class MySQLStorage:
                     """
                     CREATE TABLE IF NOT EXISTS chat_messages (
                         id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '消息自增主键',
-                        chat_id CHAR(36) NOT NULL COMMENT '所属会话ID',
+                        chat_id BIGINT UNSIGNED NOT NULL COMMENT '所属会话数字ID',
                         role VARCHAR(16) NOT NULL COMMENT '消息角色：user或assistant',
                         content TEXT NOT NULL COMMENT '消息正文',
                         sources JSON NOT NULL COMMENT '回答引用来源列表（JSON）',
@@ -79,7 +78,7 @@ class MySQLStorage:
                 cursor.execute(
                     """
                     CREATE TABLE IF NOT EXISTS ingest_jobs (
-                        id CHAR(36) PRIMARY KEY,
+                        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
                         status VARCHAR(32) NOT NULL,
                         stage VARCHAR(32) NOT NULL DEFAULT 'uploaded',
                         progress_percent TINYINT UNSIGNED NOT NULL DEFAULT 0,
@@ -101,7 +100,7 @@ class MySQLStorage:
                 cursor.execute(
                     """
                     CREATE TABLE IF NOT EXISTS publish_jobs (
-                        id CHAR(36) PRIMARY KEY,
+                        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
                         status VARCHAR(16) NOT NULL,
                         trigger_kind VARCHAR(16) NOT NULL,
                         scheduled_at DATETIME NOT NULL,
@@ -121,7 +120,7 @@ class MySQLStorage:
                         id BIGINT PRIMARY KEY AUTO_INCREMENT,
                         source_kind VARCHAR(16) NOT NULL,
                         source_id VARCHAR(64) NOT NULL,
-                        publish_job_id CHAR(36) NULL,
+                        publish_job_id BIGINT UNSIGNED NULL,
                         state VARCHAR(16) NOT NULL,
                         created_at DATETIME NOT NULL,
                         updated_at DATETIME NOT NULL,
@@ -195,16 +194,16 @@ class MySQLStorage:
 
     def create_chat(self, title: str) -> ChatResponse:
         now = self._utc_now()
-        chat_id = str(uuid4())
         with self.connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO chats (id, title, status, created_at, updated_at, last_message_at)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO chats (title, status, created_at, updated_at, last_message_at)
+                    VALUES (%s, %s, %s, %s, %s)
                     """,
-                    (chat_id, title, "active", now, now, None),
+                    (title, "active", now, now, None),
                 )
+                chat_id = int(cursor.lastrowid)
                 cursor.execute(
                     """
                     SELECT id, title, status, created_at, updated_at, last_message_at
@@ -218,7 +217,7 @@ class MySQLStorage:
             raise StorageError("Failed to reload created chat.")
         return self._chat_from_row(row)
 
-    def get_chat(self, chat_id: str) -> ChatResponse | None:
+    def get_chat(self, chat_id: int) -> ChatResponse | None:
         rows = self._fetch_all(
             """
             SELECT id, title, status, created_at, updated_at, last_message_at
@@ -231,7 +230,7 @@ class MySQLStorage:
             return None
         return self._chat_from_row(rows[0])
 
-    def rename_chat(self, chat_id: str, title: str) -> ChatResponse:
+    def rename_chat(self, chat_id: int, title: str) -> ChatResponse:
         updated_at = self._utc_now()
         with self.connect() as connection:
             with connection.cursor() as cursor:
@@ -258,7 +257,7 @@ class MySQLStorage:
             raise StorageError("Failed to reload renamed chat.")
         return self._chat_from_row(row)
 
-    def list_messages(self, chat_id: str) -> list[ChatMessageResponse]:
+    def list_messages(self, chat_id: int) -> list[ChatMessageResponse]:
         rows = self._fetch_all(
             """
             SELECT id, chat_id, role, content, sources, relevant_pages, citations,
@@ -273,7 +272,7 @@ class MySQLStorage:
 
     def list_recent_messages(
         self,
-        chat_id: str,
+        chat_id: int,
         limit: int,
         before_message_id: int | None = None,
     ) -> list[ChatMessageResponse]:
@@ -303,7 +302,7 @@ class MySQLStorage:
         messages.reverse()
         return messages
 
-    def count_messages(self, chat_id: str) -> int:
+    def count_messages(self, chat_id: int) -> int:
         rows = self._fetch_all(
             """
             SELECT COUNT(*) AS message_count
@@ -316,7 +315,7 @@ class MySQLStorage:
 
     def create_message(
         self,
-        chat_id: str,
+        chat_id: int,
         role: str,
         content: str,
         sources: list[str] | None = None,
@@ -365,7 +364,7 @@ class MySQLStorage:
             raise StorageError("Failed to reload created message.")
         return self._message_from_row(row)
 
-    def get_message(self, chat_id: str, message_id: int) -> ChatMessageResponse | None:
+    def get_message(self, chat_id: int, message_id: int) -> ChatMessageResponse | None:
         rows = self._fetch_all(
             """
             SELECT id, chat_id, role, content, sources, relevant_pages, citations,
@@ -381,7 +380,7 @@ class MySQLStorage:
 
     def get_previous_user_message(
         self,
-        chat_id: str,
+        chat_id: int,
         before_message_id: int,
     ) -> ChatMessageResponse | None:
         rows = self._fetch_all(
@@ -401,7 +400,7 @@ class MySQLStorage:
 
     def mark_message_synthesized(
         self,
-        chat_id: str,
+        chat_id: int,
         message_id: int,
         synthesis_path: str,
         synthesized_at: datetime,
@@ -439,7 +438,6 @@ class MySQLStorage:
     def create_ingest_job(
         self,
         *,
-        job_id: str,
         status: str,
         original_filename: str,
         stored_filename: str,
@@ -453,15 +451,14 @@ class MySQLStorage:
                 cursor.execute(
                     """
                     INSERT INTO ingest_jobs (
-                        id, status, stage, progress_percent,
+                        status, stage, progress_percent,
                         original_filename, stored_filename, source_path,
                         created_pages, updated_pages, contradictions, validation,
                         error, created_at, started_at, updated_at, finished_at
                     )
-                    VALUES (%s, %s, 'uploaded', 0, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NULL, %s, NULL)
+                    VALUES (%s, 'uploaded', 0, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NULL, %s, NULL)
                     """,
                     (
-                        job_id,
                         status,
                         original_filename,
                         stored_filename,
@@ -474,18 +471,19 @@ class MySQLStorage:
                         created_at,
                     ),
                 )
+                job_id = int(cursor.lastrowid)
                 cursor.execute("SELECT * FROM ingest_jobs WHERE id = %s", (job_id,))
                 row = cursor.fetchone()
         if row is None:
             raise StorageError("Failed to reload created ingest job.")
         return self._ingest_job_from_row(row)
 
-    def get_ingest_job(self, job_id: str) -> IngestJobResponse | None:
+    def get_ingest_job(self, job_id: int) -> IngestJobResponse | None:
         rows = self._fetch_all("SELECT * FROM ingest_jobs WHERE id = %s", (job_id,))
         if not rows:
             return None
         job = self._ingest_job_from_row(rows[0])
-        return job.model_copy(update={"publication": self.get_publication(source_kind="ingest", source_id=job_id)})
+        return job.model_copy(update={"publication": self.get_publication(source_kind="ingest", source_id=str(job_id))})
 
     def list_ingest_jobs(self, limit: int) -> list[IngestJobResponse]:
         rows = self._fetch_all(
@@ -498,11 +496,11 @@ class MySQLStorage:
             (limit,),
         )
         return [
-            job.model_copy(update={"publication": self.get_publication(source_kind="ingest", source_id=job.job_id)})
+            job.model_copy(update={"publication": self.get_publication(source_kind="ingest", source_id=str(job.job_id))})
             for job in (self._ingest_job_from_row(row) for row in rows)
         ]
 
-    def mark_ingest_job_running(self, job_id: str, started_at: datetime) -> None:
+    def mark_ingest_job_running(self, job_id: int, started_at: datetime) -> None:
         self._execute_update(
             """
             UPDATE ingest_jobs
@@ -515,7 +513,7 @@ class MySQLStorage:
     def update_ingest_job_progress(
         self,
         *,
-        job_id: str,
+        job_id: int,
         stage: str,
         progress_percent: int,
         updated_at: datetime,
@@ -532,7 +530,7 @@ class MySQLStorage:
     def mark_ingest_job_succeeded(
         self,
         *,
-        job_id: str,
+        job_id: int,
         created_pages: list[str],
         updated_pages: list[str],
         contradictions: list[str],
@@ -565,7 +563,7 @@ class MySQLStorage:
             ),
         )
 
-    def mark_ingest_job_failed(self, *, job_id: str, error: str, finished_at: datetime) -> None:
+    def mark_ingest_job_failed(self, *, job_id: int, error: str, finished_at: datetime) -> None:
         self._execute_update(
             """
             UPDATE ingest_jobs
@@ -591,17 +589,17 @@ class MySQLStorage:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    job_id = str(uuid4())
                     cursor.execute(
                         """
                         INSERT INTO publish_jobs (
-                            id, status, trigger_kind, scheduled_at, created_at, updated_at
-                        ) VALUES (%s, 'queued', 'automatic', %s, %s, %s)
+                            status, trigger_kind, scheduled_at, created_at, updated_at
+                        ) VALUES ('queued', 'automatic', %s, %s, %s)
                         """,
-                        (job_id, scheduled_at, now, now),
+                        (scheduled_at, now, now),
                     )
+                    job_id = int(cursor.lastrowid)
                 else:
-                    job_id = str(row["id"])
+                    job_id = int(row["id"])
                     max_delay = max_scheduled_at - now
                     deadline = row["created_at"] + max_delay
                     effective_schedule = min(scheduled_at, deadline)
@@ -627,14 +625,14 @@ class MySQLStorage:
                 )
                 running = cursor.fetchone()
                 if running is not None:
-                    job_id = str(running["id"])
+                    job_id = int(running["id"])
                 else:
                     cursor.execute(
                         "SELECT * FROM publish_jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1 FOR UPDATE"
                     )
                     queued = cursor.fetchone()
                     if queued is not None:
-                        job_id = str(queued["id"])
+                        job_id = int(queued["id"])
                         cursor.execute(
                             """
                             UPDATE publish_jobs
@@ -644,15 +642,15 @@ class MySQLStorage:
                             (now, now, job_id),
                         )
                     else:
-                        job_id = str(uuid4())
                         cursor.execute(
                             """
                             INSERT INTO publish_jobs (
-                                id, status, trigger_kind, scheduled_at, created_at, updated_at
-                            ) VALUES (%s, 'queued', 'manual', %s, %s, %s)
+                                status, trigger_kind, scheduled_at, created_at, updated_at
+                            ) VALUES ('queued', 'manual', %s, %s, %s)
                             """,
-                            (job_id, now, now, now),
+                            (now, now, now),
                         )
+                        job_id = int(cursor.lastrowid)
                         cursor.execute(
                             """
                             UPDATE publish_changes
@@ -678,7 +676,7 @@ class MySQLStorage:
                 row = cursor.fetchone()
                 if row is None:
                     return None
-                job_id = str(row["id"])
+                job_id = int(row["id"])
                 cursor.execute(
                     "UPDATE publish_jobs SET status = 'running', started_at = %s, updated_at = %s WHERE id = %s",
                     (now, now, job_id),
@@ -689,7 +687,7 @@ class MySQLStorage:
                 )
         return self.get_publish_job(job_id)
 
-    def mark_publish_job_succeeded(self, *, job_id: str, release_id: str, finished_at: datetime) -> None:
+    def mark_publish_job_succeeded(self, *, job_id: int, release_id: str, finished_at: datetime) -> None:
         with self.connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -706,7 +704,7 @@ class MySQLStorage:
                     (finished_at, job_id),
                 )
 
-    def mark_publish_job_failed(self, *, job_id: str, error: str, finished_at: datetime) -> None:
+    def mark_publish_job_failed(self, *, job_id: int, error: str, finished_at: datetime) -> None:
         with self.connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -739,17 +737,17 @@ class MySQLStorage:
                 cursor.execute("SELECT id FROM publish_jobs WHERE status = 'queued' LIMIT 1")
                 if cursor.fetchone() is not None:
                     return
-                job_id = str(uuid4())
                 cursor.execute(
-                    "INSERT INTO publish_jobs (id, status, trigger_kind, scheduled_at, created_at, updated_at) VALUES (%s, 'queued', 'automatic', %s, %s, %s)",
-                    (job_id, now, now, now),
+                    "INSERT INTO publish_jobs (status, trigger_kind, scheduled_at, created_at, updated_at) VALUES ('queued', 'automatic', %s, %s, %s)",
+                    (now, now, now),
                 )
+                job_id = int(cursor.lastrowid)
                 cursor.execute(
                     "UPDATE publish_changes SET publish_job_id = %s, updated_at = %s WHERE state = 'pending' AND publish_job_id IS NULL",
                     (job_id, now),
                 )
 
-    def get_publish_job(self, job_id: str) -> PublishJobResponse | None:
+    def get_publish_job(self, job_id: int) -> PublishJobResponse | None:
         rows = self._fetch_all(self._publish_job_select("WHERE p.id = %s"), (job_id,))
         return self._publish_job_from_row(rows[0]) if rows else None
 
@@ -783,14 +781,14 @@ class MySQLStorage:
         row = rows[0]
         return PublicationResponse(
             status=row["state"],
-            job_id=row.get("publish_job_id"),
+            job_id=int(row["publish_job_id"]) if row.get("publish_job_id") is not None else None,
             published_at=row.get("published_at"),
             error=row.get("error") if row["state"] == "failed" else None,
         )
 
     def update_chat_activity(
         self,
-        chat_id: str,
+        chat_id: int,
         updated_at: datetime,
         last_message_at: datetime | None,
     ) -> ChatResponse:
@@ -926,7 +924,7 @@ class MySQLStorage:
         }
         expected_column_comments = {
             "chats": {
-                "id": "会话唯一标识（UUID）",
+                "id": "会话数字自增主键",
                 "title": "会话标题",
                 "status": "会话状态",
                 "created_at": "创建时间（UTC）",
@@ -935,7 +933,7 @@ class MySQLStorage:
             },
             "chat_messages": {
                 "id": "消息自增主键",
-                "chat_id": "所属会话ID",
+                "chat_id": "所属会话数字ID",
                 "role": "消息角色：user或assistant",
                 "content": "消息正文",
                 "sources": "回答引用来源列表（JSON）",
@@ -988,11 +986,12 @@ class MySQLStorage:
                 actual_column_types["chats"].get(column_name) != "datetime"
                 for column_name in ("created_at", "updated_at", "last_message_at")
             )
+            or actual_column_types["chats"].get("id") != "bigint unsigned"
         ):
             cursor.execute(
                 """
                 ALTER TABLE chats
-                    MODIFY COLUMN id CHAR(36) NOT NULL COMMENT '会话唯一标识（UUID）',
+                    MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '会话数字自增主键',
                     MODIFY COLUMN title VARCHAR(200) NOT NULL COMMENT '会话标题',
                     MODIFY COLUMN status VARCHAR(32) NOT NULL DEFAULT 'active' COMMENT '会话状态',
                     MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
@@ -1008,6 +1007,7 @@ class MySQLStorage:
             != expected_column_comments["chat_messages"]
             or actual_column_types["chat_messages"].get("created_at") != "datetime"
             or actual_column_types["chat_messages"].get("synthesized_at") not in {None, "datetime"}
+            or actual_column_types["chat_messages"].get("chat_id") != "bigint unsigned"
         ):
             if "synthesis_path" not in actual_column_types["chat_messages"]:
                 cursor.execute(
@@ -1029,7 +1029,7 @@ class MySQLStorage:
                 """
                 ALTER TABLE chat_messages
                     MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT COMMENT '消息自增主键',
-                    MODIFY COLUMN chat_id CHAR(36) NOT NULL COMMENT '所属会话ID',
+                    MODIFY COLUMN chat_id BIGINT UNSIGNED NOT NULL COMMENT '所属会话数字ID',
                     MODIFY COLUMN role VARCHAR(16) NOT NULL COMMENT '消息角色：user或assistant',
                     MODIFY COLUMN content TEXT NOT NULL COMMENT '消息正文',
                     MODIFY COLUMN sources JSON NOT NULL COMMENT '回答引用来源列表（JSON）',
@@ -1067,7 +1067,7 @@ class MySQLStorage:
 
     def _chat_from_row(self, row: dict[str, Any]) -> ChatResponse:
         return ChatResponse(
-            id=str(row["id"]),
+            id=int(row["id"]),
             title=str(row["title"]),
             status=str(row["status"]),
             created_at=row["created_at"],
@@ -1079,7 +1079,7 @@ class MySQLStorage:
     def _message_from_row(self, row: dict[str, Any]) -> ChatMessageResponse:
         return ChatMessageResponse(
             id=int(row["id"]),
-            chat_id=str(row["chat_id"]),
+            chat_id=int(row["chat_id"]),
             role=row["role"],
             content=str(row["content"]),
             sources=self._parse_json_field(row.get("sources")),
@@ -1110,7 +1110,7 @@ class MySQLStorage:
 
     def _ingest_job_from_row(self, row: dict[str, Any]) -> IngestJobResponse:
         return IngestJobResponse(
-            job_id=str(row["id"]),
+            job_id=int(row["id"]),
             status=row["status"],
             stage=row.get("stage", "uploaded"),
             progress_percent=int(row.get("progress_percent", 0)),
@@ -1137,13 +1137,13 @@ class MySQLStorage:
         """ + suffix
 
     @staticmethod
-    def _raise_missing_publish_job(job_id: str) -> PublishJobResponse:
+    def _raise_missing_publish_job(job_id: int) -> PublishJobResponse:
         raise StorageError(f"Failed to reload publish job: {job_id}")
 
     @staticmethod
     def _publish_job_from_row(row: dict[str, Any]) -> PublishJobResponse:
         return PublishJobResponse(
-            job_id=str(row["id"]),
+            job_id=int(row["id"]),
             status=row["status"],
             trigger=row["trigger_kind"],
             change_count=int(row.get("change_count", 0)),

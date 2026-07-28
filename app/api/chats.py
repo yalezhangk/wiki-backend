@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Request
 
 from app.schemas.chat import (
     ChatCreateRequest,
@@ -79,7 +81,7 @@ def create_chat(
     description="根据会话 ID 更新标题，不会修改会话中的历史消息内容。",
 )
 def rename_chat(
-    chat_id: str,
+    chat_id: Annotated[int, Path(gt=0)],
     payload: ChatRenameRequest,
     chat_service: ChatService = Depends(get_chat_service),
 ) -> ChatResponse:
@@ -113,7 +115,7 @@ def rename_chat(
     ),
 )
 def list_chat_messages(
-    chat_id: str,
+    chat_id: Annotated[int, Path(gt=0)],
     chat_service: ChatService = Depends(get_chat_service),
 ) -> ChatMessagesResponse:
     """查询指定会话的完整消息历史。"""
@@ -139,7 +141,7 @@ def list_chat_messages(
     ),
 )
 def send_message(
-    chat_id: str,
+    chat_id: Annotated[int, Path(gt=0)],
     payload: ChatMessageCreateRequest,
     chat_turn_service: ChatTurnService = Depends(get_chat_turn_service),
 ) -> ChatTurnResponse:

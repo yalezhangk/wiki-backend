@@ -32,21 +32,21 @@ class ChatService:
         normalized_title = self._normalize_optional_text(title) or self._default_chat_title
         return self._storage.create_chat(normalized_title)
 
-    def get_chat(self, chat_id: str) -> ChatResponse:
+    def get_chat(self, chat_id: int) -> ChatResponse:
         chat = self._storage.get_chat(chat_id)
         if chat is None:
             raise ChatNotFoundError(f"chat not found: {chat_id}")
         return chat
 
-    def rename_chat(self, chat_id: str, title: str) -> ChatResponse:
+    def rename_chat(self, chat_id: int, title: str) -> ChatResponse:
         normalized_title = self._normalize_required_single_line_text(title, "title")
         return self._storage.rename_chat(chat_id, normalized_title)
 
-    def list_messages(self, chat_id: str) -> list[ChatMessageResponse]:
+    def list_messages(self, chat_id: int) -> list[ChatMessageResponse]:
         self.get_chat(chat_id)
         return self._storage.list_messages(chat_id)
 
-    def get_message(self, chat_id: str, message_id: int) -> ChatMessageResponse:
+    def get_message(self, chat_id: int, message_id: int) -> ChatMessageResponse:
         self.get_chat(chat_id)
         message = self._storage.get_message(chat_id, message_id)
         if message is None:
@@ -55,7 +55,7 @@ class ChatService:
 
     def get_previous_user_message(
         self,
-        chat_id: str,
+        chat_id: int,
         before_message_id: int,
     ) -> ChatMessageResponse | None:
         self.get_chat(chat_id)
@@ -63,20 +63,20 @@ class ChatService:
 
     def list_recent_messages(
         self,
-        chat_id: str,
+        chat_id: int,
         limit: int,
         before_message_id: int | None = None,
     ) -> list[ChatMessageResponse]:
         self.get_chat(chat_id)
         return self._storage.list_recent_messages(chat_id, limit=limit, before_message_id=before_message_id)
 
-    def count_messages(self, chat_id: str) -> int:
+    def count_messages(self, chat_id: int) -> int:
         self.get_chat(chat_id)
         return self._storage.count_messages(chat_id)
 
     def create_message(
         self,
-        chat_id: str,
+        chat_id: int,
         role: str,
         content: str,
         sources: list[str] | None = None,
@@ -98,7 +98,7 @@ class ChatService:
 
     def update_chat_activity(
         self,
-        chat_id: str,
+        chat_id: int,
         updated_at: datetime,
         last_message_at: datetime | None,
     ) -> ChatResponse:
@@ -106,7 +106,7 @@ class ChatService:
 
     def mark_message_synthesized(
         self,
-        chat_id: str,
+        chat_id: int,
         message_id: int,
         synthesis_path: str,
         synthesized_at: datetime,

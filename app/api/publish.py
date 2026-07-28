@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from app.main_dependencies import get_publish_service
 from app.schemas.publish import PublishJobResponse, PublishStatusResponse
@@ -34,7 +36,7 @@ def list_publish_jobs(
 
 @router.get("/jobs/{job_id}", response_model=PublishJobResponse, summary="查询发布任务详情")
 def get_publish_job(
-    job_id: str,
+    job_id: Annotated[int, Path(gt=0)],
     publish_service: PublishService = Depends(get_publish_service),
 ) -> PublishJobResponse:
     try:

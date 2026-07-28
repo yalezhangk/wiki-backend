@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Request, UploadFile, status
 
 from app.schemas.ingest import IngestJobResponse
 from app.services.ingest_service import (
@@ -97,7 +99,7 @@ def list_ingest_jobs(
     ),
 )
 def get_ingest_job(
-    job_id: str,
+    job_id: Annotated[int, Path(gt=0)],
     ingest_service: IngestService = Depends(get_ingest_service),
 ) -> IngestJobResponse:
     """查询指定 Ingest 任务的完整详情。"""

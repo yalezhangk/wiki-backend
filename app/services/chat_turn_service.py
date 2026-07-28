@@ -16,7 +16,7 @@ class ChatTurnService:
         self._query_service = query_service
         self._history_limit = history_limit
 
-    def run_turn(self, chat_id: str, content: str) -> ChatTurnResponse:
+    def run_turn(self, chat_id: int, content: str) -> ChatTurnResponse:
         chat = self._chat_service.get_chat(chat_id)
         existing_message_count = self._chat_service.count_messages(chat_id)
 

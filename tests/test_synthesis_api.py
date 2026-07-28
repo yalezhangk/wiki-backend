@@ -23,7 +23,7 @@ class FakeSynthesisService:
     def save_chat_answer(
         self,
         *,
-        chat_id: str,
+        chat_id: int,
         assistant_message_id: int,
         title: str | None,
     ) -> SynthesisResponse:
@@ -58,7 +58,7 @@ class SynthesisApiTests(unittest.TestCase):
         response = self.client.post(
             "/api/synthesis",
             json={
-                "chat_id": "chat-1",
+                "chat_id": 1,
                 "assistant_message_id": 2,
                 "title": "自定义标题",
             },
@@ -68,7 +68,7 @@ class SynthesisApiTests(unittest.TestCase):
         self.assertEqual(
             response.json(),
             {
-                "chat_id": "chat-1",
+                "chat_id": 1,
                 "assistant_message_id": 2,
                 "question_message_id": 1,
                 "title": "自定义标题",
@@ -79,13 +79,13 @@ class SynthesisApiTests(unittest.TestCase):
         )
         self.assertEqual(
             self.service.last_payload,
-            {"chat_id": "chat-1", "assistant_message_id": 2, "title": "自定义标题"},
+            {"chat_id": 1, "assistant_message_id": 2, "title": "自定义标题"},
         )
 
     def test_create_synthesis_rejects_empty_title(self) -> None:
         response = self.client.post(
             "/api/synthesis",
-            json={"chat_id": "chat-1", "assistant_message_id": 2, "title": "   "},
+            json={"chat_id": 1, "assistant_message_id": 2, "title": "   "},
         )
 
         self.assertEqual(response.status_code, 422)
@@ -95,7 +95,7 @@ class SynthesisApiTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/synthesis",
-            json={"chat_id": "missing", "assistant_message_id": 2},
+            json={"chat_id": 2, "assistant_message_id": 2},
         )
 
         self.assertEqual(response.status_code, 404)
@@ -105,7 +105,7 @@ class SynthesisApiTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/synthesis",
-            json={"chat_id": "chat-1", "assistant_message_id": 1},
+            json={"chat_id": 1, "assistant_message_id": 1},
         )
 
         self.assertEqual(response.status_code, 422)
@@ -115,7 +115,7 @@ class SynthesisApiTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/synthesis",
-            json={"chat_id": "chat-1", "assistant_message_id": 2},
+            json={"chat_id": 1, "assistant_message_id": 2},
         )
 
         self.assertEqual(response.status_code, 409)
@@ -126,7 +126,7 @@ class SynthesisApiTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/synthesis",
-            json={"chat_id": "chat-1", "assistant_message_id": 2},
+            json={"chat_id": 1, "assistant_message_id": 2},
         )
 
         self.assertEqual(response.status_code, 409)
@@ -136,10 +136,18 @@ class SynthesisApiTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/synthesis",
-            json={"chat_id": "chat-1", "assistant_message_id": 2},
+            json={"chat_id": 1, "assistant_message_id": 2},
         )
 
         self.assertEqual(response.status_code, 503)
+
+    def test_create_synthesis_rejects_uuid_chat_id(self) -> None:
+        response = self.client.post(
+            "/api/synthesis",
+            json={"chat_id": "chat-1", "assistant_message_id": 2},
+        )
+
+        self.assertEqual(response.status_code, 422)
 
 
 if __name__ == "__main__":

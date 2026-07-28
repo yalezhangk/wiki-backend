@@ -15,21 +15,21 @@ from app.services.publish_service import PublishService
 
 class _Storage:
     def __init__(self) -> None:
-        self.succeeded_job_ids: list[str] = []
-        self.failed_job_ids: list[str] = []
+        self.succeeded_job_ids: list[int] = []
+        self.failed_job_ids: list[int] = []
 
     def mark_publish_job_succeeded(
-        self, *, job_id: str, release_id: str, finished_at: datetime
+        self, *, job_id: int, release_id: str, finished_at: datetime
     ) -> None:
         self.succeeded_job_ids.append(job_id)
 
-    def mark_publish_job_failed(self, *, job_id: str, error: str, finished_at: datetime) -> None:
+    def mark_publish_job_failed(self, *, job_id: int, error: str, finished_at: datetime) -> None:
         self.failed_job_ids.append(job_id)
 
 
 class PublishServiceTests(unittest.TestCase):
     @staticmethod
-    def _job(job_id: str) -> PublishJobResponse:
+    def _job(job_id: int) -> PublishJobResponse:
         now = datetime(2026, 7, 27, 9)
         return PublishJobResponse(
             job_id=job_id,
@@ -119,15 +119,15 @@ class PublishServiceTests(unittest.TestCase):
                 patch.object(service, "_build", side_effect=create_release),
                 patch.object(service, "_validate_release"),
             ):
-                service._run_job(self._job("current"))
+                service._run_job(self._job(1))
 
-            self.assertEqual(storage.succeeded_job_ids, ["current"])
+            self.assertEqual(storage.succeeded_job_ids, [1])
             self.assertFalse(snapshot_root.exists())
             self.assertFalse((root / "quartz" / ".publish" / "work").exists())
             self.assertTrue((root / "quartz" / "public").is_symlink())
             self.assertEqual(
                 sorted(entry.name for entry in releases.iterdir()),
-                ["current", "old-2", "old-3"],
+                ["1", "old-2", "old-3"],
             )
 
     def test_windows_activation_replaces_existing_public_link(self) -> None:
@@ -170,14 +170,14 @@ class PublishServiceTests(unittest.TestCase):
                 ),
                 patch.object(service, "_build", side_effect=fail_after_creating_release),
             ):
-                service._run_job(self._job("failed-current"))
+                service._run_job(self._job(2))
 
-            self.assertEqual(storage.failed_job_ids, ["failed-current"])
+            self.assertEqual(storage.failed_job_ids, [2])
             self.assertFalse(snapshot_root.exists())
             self.assertFalse((root / "quartz" / ".publish" / "work").exists())
             self.assertEqual(
                 sorted(entry.name for entry in releases.iterdir()),
-                ["failed-current", "old-2", "old-3"],
+                ["2", "old-2", "old-3"],
             )
 
 

@@ -59,7 +59,7 @@ class SynthesisService:
     def save_chat_answer(
         self,
         *,
-        chat_id: str,
+        chat_id: int,
         assistant_message_id: int,
         title: str | None,
     ) -> SynthesisResponse:
@@ -128,7 +128,7 @@ class SynthesisService:
         relative_path: Path,
         markdown: str,
         title: str,
-        chat_id: str,
+        chat_id: int,
         assistant_message_id: int,
         created_at: datetime,
     ) -> None:
@@ -210,7 +210,7 @@ class SynthesisService:
         *,
         title: str,
         relative_path: Path,
-        chat_id: str,
+        chat_id: int,
         assistant_message_id: int,
         created_at: datetime,
     ) -> None:
@@ -274,8 +274,8 @@ class SynthesisService:
         return "\n".join(frontmatter) + assistant_message.content.rstrip() + "\n"
 
     @staticmethod
-    def _yaml_string(value: str) -> str:
-        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    def _yaml_string(value: str | int) -> str:
+        return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
     def _yaml_list(self, values: list[str]) -> list[str]:
         if not values:

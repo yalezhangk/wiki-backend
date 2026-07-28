@@ -13,7 +13,7 @@ SynthesisTitle = Annotated[str, StringConstraints(strip_whitespace=True, min_len
 class SynthesisCreateRequest(BaseModel):
     """保存聊天助手回答为 Synthesis 的请求体。"""
 
-    chat_id: str = Field(min_length=1, max_length=36, description="聊天会话 ID。")
+    chat_id: int = Field(gt=0, description="聊天会话数字 ID。")
     assistant_message_id: int = Field(gt=0, description="要保存的助手消息 ID。")
     title: SynthesisTitle | None = Field(default=None, description="可选 Synthesis 标题。")
 
@@ -21,7 +21,7 @@ class SynthesisCreateRequest(BaseModel):
 class SynthesisResponse(BaseModel):
     """保存 Synthesis 后的响应体。"""
 
-    chat_id: str = Field(description="聊天会话 ID。")
+    chat_id: int = Field(gt=0, description="聊天会话数字 ID。")
     assistant_message_id: int = Field(description="已保存的助手消息 ID。")
     question_message_id: int = Field(description="该助手回答对应的用户问题消息 ID。")
     title: str = Field(description="Synthesis 标题。")

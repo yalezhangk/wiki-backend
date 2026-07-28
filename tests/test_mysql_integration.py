@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import unittest
 from datetime import datetime, timedelta
-from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -51,8 +50,8 @@ class MySQLIntegrationTests(unittest.TestCase):
             database=settings.mysql_database,
         )
         self.storage.initialize()
-        self.created_chat_ids: list[str] = []
-        self.created_ingest_job_ids: list[str] = []
+        self.created_chat_ids: list[int] = []
+        self.created_ingest_job_ids: list[int] = []
 
         chat_service = ChatService(self.storage)
         turn_service = ChatTurnService(
@@ -89,12 +88,14 @@ class MySQLIntegrationTests(unittest.TestCase):
         self.assertEqual(first_response.status_code, 200)
         first_chat = first_response.json()
         self.created_chat_ids.append(first_chat["id"])
+        self.assertIsInstance(first_chat["id"], int)
         self.assertEqual(first_chat["title"], "新对话")
 
         second_response = self.client.post("/api/chats", json={"title": "待重命名"})
         self.assertEqual(second_response.status_code, 200)
         second_chat = second_response.json()
         self.created_chat_ids.append(second_chat["id"])
+        self.assertIsInstance(second_chat["id"], int)
 
         turn_response = self.client.post(
             f"/api/chats/{first_chat['id']}/messages",
@@ -235,20 +236,68 @@ class MySQLIntegrationTests(unittest.TestCase):
         self.assertEqual(str(columns["progress_percent"]["COLUMN_DEFAULT"]), "0")
         self.assertEqual(columns["updated_at"]["IS_NULLABLE"], "NO")
 
+    def test_numeric_primary_keys_and_references_have_expected_types(self) -> None:
+        expected = {
+            ("chats", "id"),
+            ("chat_messages", "chat_id"),
+            ("ingest_jobs", "id"),
+            ("publish_jobs", "id"),
+            ("publish_changes", "publish_job_id"),
+        }
+        with self.storage.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, EXTRA
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = %s
+                      AND (TABLE_NAME, COLUMN_NAME) IN (
+                          ('chats', 'id'), ('chat_messages', 'chat_id'),
+                          ('ingest_jobs', 'id'), ('publish_jobs', 'id'),
+                          ('publish_changes', 'publish_job_id')
+                      )
+                    """,
+                    (settings.mysql_database,),
+                )
+                rows = cursor.fetchall()
+                cursor.execute(
+                    """
+                    SELECT REFERENCED_TABLE_NAME
+                    FROM information_schema.KEY_COLUMN_USAGE
+                    WHERE TABLE_SCHEMA = %s
+                      AND TABLE_NAME = 'chat_messages'
+                      AND COLUMN_NAME = 'chat_id'
+                      AND REFERENCED_TABLE_NAME = 'chats'
+                    """,
+                    (settings.mysql_database,),
+                )
+                foreign_key = cursor.fetchone()
+
+        self.assertEqual({(row["TABLE_NAME"], row["COLUMN_NAME"]) for row in rows}, expected)
+        self.assertTrue(all(row["COLUMN_TYPE"] == "bigint unsigned" for row in rows))
+        self.assertTrue(
+            all(
+                row["EXTRA"] == "auto_increment"
+                for row in rows
+                if (row["TABLE_NAME"], row["COLUMN_NAME"])
+                in {("chats", "id"), ("ingest_jobs", "id"), ("publish_jobs", "id")}
+            )
+        )
+        self.assertIsNotNone(foreign_key)
+
     def test_ingest_progress_round_trip_with_real_mysql(self) -> None:
-        failed_job_id = str(uuid4())
-        succeeded_job_id = str(uuid4())
-        self.created_ingest_job_ids.extend([failed_job_id, succeeded_job_id])
         created_at = datetime(2026, 7, 22, 10, 0, 0)
 
         failed_job = self.storage.create_ingest_job(
-            job_id=failed_job_id,
             status="queued",
             original_filename="failed.md",
             stored_filename="failed.md",
             source_path="raw/uploads/failed.md",
             created_at=created_at,
         )
+        failed_job_id = failed_job.job_id
+        self.created_ingest_job_ids.append(failed_job_id)
+        self.assertIsInstance(failed_job_id, int)
         self.assertEqual((failed_job.stage, failed_job.progress_percent), ("uploaded", 0))
         self.assertEqual(failed_job.updated_at, created_at)
 
@@ -274,14 +323,15 @@ class MySQLIntegrationTests(unittest.TestCase):
         self.assertEqual((reloaded_failed.stage, reloaded_failed.progress_percent), ("writing_wiki", 65))
         self.assertEqual(reloaded_failed.updated_at, failed_at)
 
-        self.storage.create_ingest_job(
-            job_id=succeeded_job_id,
+        succeeded_job = self.storage.create_ingest_job(
             status="queued",
             original_filename="succeeded.md",
             stored_filename="succeeded.md",
             source_path="raw/uploads/succeeded.md",
             created_at=created_at,
         )
+        succeeded_job_id = succeeded_job.job_id
+        self.created_ingest_job_ids.append(succeeded_job_id)
         finished_at = datetime(2026, 7, 22, 10, 0, 4)
         self.storage.mark_ingest_job_succeeded(
             job_id=succeeded_job_id,

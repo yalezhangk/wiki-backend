@@ -15,7 +15,7 @@ from app.storage.mysql import ChatNotFoundError
 class FakeChatService:
     def __init__(self) -> None:
         self.chat = ChatResponse(
-            id="chat-1",
+            id=1,
             title="新对话",
             status="active",
             created_at=datetime(2026, 6, 17),
@@ -33,18 +33,18 @@ class FakeChatService:
             self.chat = self.chat.model_copy(update={"title": title})
         return self.chat
 
-    def get_chat(self, chat_id: str) -> ChatResponse:
+    def get_chat(self, chat_id: int) -> ChatResponse:
         if chat_id != self.chat.id:
             raise ChatNotFoundError(chat_id)
         return self.chat
 
-    def rename_chat(self, chat_id: str, title: str) -> ChatResponse:
+    def rename_chat(self, chat_id: int, title: str) -> ChatResponse:
         if chat_id != self.chat.id:
             raise ChatNotFoundError(chat_id)
         self.chat = self.chat.model_copy(update={"title": title})
         return self.chat
 
-    def list_messages(self, chat_id: str) -> list[ChatMessageResponse]:
+    def list_messages(self, chat_id: int) -> list[ChatMessageResponse]:
         if chat_id != self.chat.id:
             raise ChatNotFoundError(chat_id)
         return list(self.messages)
@@ -55,7 +55,7 @@ class FakeChatTurnService:
         self._chat_service = chat_service
         self.should_fail = False
 
-    def run_turn(self, chat_id: str, content: str):  # type: ignore[no-untyped-def]
+    def run_turn(self, chat_id: int, content: str):  # type: ignore[no-untyped-def]
         if chat_id != self._chat_service.chat.id:
             raise ChatNotFoundError(chat_id)
         if self.should_fail:
@@ -125,7 +125,7 @@ class ChatsApiTests(unittest.TestCase):
         self.assertEqual(
             response.json()[0],
             {
-                "id": "chat-1",
+                "id": 1,
                 "title": "新对话",
                 "status": "active",
                 "created_at": "2026-06-17T00:00:00",
@@ -146,16 +146,16 @@ class ChatsApiTests(unittest.TestCase):
         self.chat_service.messages.append(
             ChatMessageResponse(
                 id=1,
-                chat_id="chat-1",
+                chat_id=1,
                 role="assistant",
                 content=markdown,
                 created_at=datetime(2026, 6, 17),
             )
         )
-        response = self.client.get("/api/chats/chat-1/messages")
+        response = self.client.get("/api/chats/1/messages")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["chat"]["id"], "chat-1")
+        self.assertEqual(response.json()["chat"]["id"], 1)
         self.assertEqual(response.json()["messages"][0]["content"], markdown)
         self.assertEqual(response.json()["messages"][0]["sources"], [])
         self.assertEqual(response.json()["messages"][0]["relevant_pages"], [])
@@ -165,7 +165,7 @@ class ChatsApiTests(unittest.TestCase):
         self.assertIsNone(response.json()["messages"][0]["synthesized_at"])
 
     def test_post_message_returns_turn_payload(self) -> None:
-        response = self.client.post("/api/chats/chat-1/messages", json={"content": "hello"})
+        response = self.client.post("/api/chats/1/messages", json={"content": "hello"})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -184,20 +184,20 @@ class ChatsApiTests(unittest.TestCase):
         )
 
     def test_post_message_returns_404_for_missing_chat(self) -> None:
-        response = self.client.post("/api/chats/missing/messages", json={"content": "hello"})
+        response = self.client.post("/api/chats/2/messages", json={"content": "hello"})
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "chat not found")
 
     def test_post_message_returns_422_for_empty_content(self) -> None:
-        response = self.client.post("/api/chats/chat-1/messages", json={"content": "   "})
+        response = self.client.post("/api/chats/1/messages", json={"content": "   "})
 
         self.assertEqual(response.status_code, 422)
 
     def test_post_message_returns_502_for_query_failure(self) -> None:
         self.chat_turn_service.should_fail = True
 
-        response = self.client.post("/api/chats/chat-1/messages", json={"content": "hello"})
+        response = self.client.post("/api/chats/1/messages", json={"content": "hello"})
 
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.json()["detail"], "llm failed")
@@ -206,14 +206,18 @@ class ChatsApiTests(unittest.TestCase):
         self.chat_turn_service.should_fail = True
 
         with self.assertLogs("uvicorn.error", level="ERROR") as logs:
-            response = self.client.post("/api/chats/chat-1/messages", json={"content": "hello"})
+            response = self.client.post("/api/chats/1/messages", json={"content": "hello"})
 
         self.assertEqual(response.status_code, 502)
         self.assertIn(
-            "HTTP 502 for POST /api/chats/chat-1/messages: llm failed",
+            "HTTP 502 for POST /api/chats/1/messages: llm failed",
             "\n".join(logs.output),
         )
         self.assertIsNotNone(logs.records[0].exc_info)
+
+    def test_chat_routes_reject_uuid_and_non_positive_ids(self) -> None:
+        self.assertEqual(self.client.get("/api/chats/chat-1/messages").status_code, 422)
+        self.assertEqual(self.client.get("/api/chats/0/messages").status_code, 422)
 
 
 if __name__ == "__main__":

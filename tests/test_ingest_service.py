@@ -35,22 +35,22 @@ class FakeMigrationCursor:
 
 class FakeStorage:
     def __init__(self) -> None:
-        self.jobs: dict[str, IngestJobResponse] = {}
-        self.running: list[str] = []
-        self.succeeded: list[str] = []
-        self.failed: list[str] = []
+        self.jobs: dict[int, IngestJobResponse] = {}
+        self.running: list[int] = []
+        self.succeeded: list[int] = []
+        self.failed: list[int] = []
         self.progress_updates: list[tuple[str, int]] = []
 
     def create_ingest_job(
         self,
         *,
-        job_id: str,
         status: str,
         original_filename: str,
         stored_filename: str,
         source_path: str,
         created_at: datetime,
     ) -> IngestJobResponse:
+        job_id = len(self.jobs) + 1
         job = IngestJobResponse(
             job_id=job_id,
             status=status,
@@ -65,13 +65,13 @@ class FakeStorage:
         self.jobs[job_id] = job
         return job
 
-    def get_ingest_job(self, job_id: str) -> IngestJobResponse | None:
+    def get_ingest_job(self, job_id: int) -> IngestJobResponse | None:
         return self.jobs.get(job_id)
 
     def list_ingest_jobs(self, limit: int) -> list[IngestJobResponse]:
         return list(self.jobs.values())[:limit]
 
-    def mark_ingest_job_running(self, job_id: str, started_at: datetime) -> None:
+    def mark_ingest_job_running(self, job_id: int, started_at: datetime) -> None:
         self.running.append(job_id)
         self.jobs[job_id] = self.jobs[job_id].model_copy(
             update={"status": "running", "started_at": started_at, "updated_at": started_at}
@@ -80,7 +80,7 @@ class FakeStorage:
     def update_ingest_job_progress(
         self,
         *,
-        job_id: str,
+        job_id: int,
         stage: str,
         progress_percent: int,
         updated_at: datetime,
@@ -97,7 +97,7 @@ class FakeStorage:
     def mark_ingest_job_succeeded(
         self,
         *,
-        job_id: str,
+        job_id: int,
         created_pages: list[str],
         updated_pages: list[str],
         contradictions: list[str],
@@ -119,7 +119,7 @@ class FakeStorage:
             }
         )
 
-    def mark_ingest_job_failed(self, *, job_id: str, error: str, finished_at: datetime) -> None:
+    def mark_ingest_job_failed(self, *, job_id: int, error: str, finished_at: datetime) -> None:
         self.failed.append(job_id)
         self.jobs[job_id] = self.jobs[job_id].model_copy(
             update={
@@ -231,11 +231,11 @@ class IngestServiceTests(unittest.TestCase):
             prompt="prompt",
             raw="I cannot produce JSON for this document.",
             source_path=source_path,
-            job_id="job-1",
+            job_id=1,
         )
 
         self.assertEqual(parsed["slug"], "report")
-        self.assertTrue((source_path.parent / "report.job-1.initial.llm-response.txt").exists())
+        self.assertTrue((source_path.parent / "report.1.initial.llm-response.txt").exists())
 
     def test_parse_truncated_json_is_not_sent_to_json_repair(self) -> None:
         source_path = self.agent_root / "raw" / "uploads" / "report.md"
@@ -255,12 +255,12 @@ class IngestServiceTests(unittest.TestCase):
                 prompt="prompt",
                 raw='{"title":"unfinished',
                 source_path=source_path,
-                job_id="job-truncated",
+                job_id=2,
             )
 
         self.assertEqual(call_count, 0)
         self.assertTrue(
-            (source_path.parent / "report.job-truncated.initial.llm-response.txt").exists()
+            (source_path.parent / "report.2.initial.llm-response.txt").exists()
         )
 
     def test_provider_truncation_saves_partial_response_before_job_fails(self) -> None:
@@ -298,7 +298,7 @@ class IngestServiceTests(unittest.TestCase):
                 prompt="prompt",
                 raw="not json",
                 source_path=source_path,
-                job_id="job-invalid",
+                job_id=3,
             )
 
         self.assertTrue(str(context.exception).startswith("llm_json_invalid:"))

@@ -19,7 +19,7 @@ from app.storage.mysql import ChatNotFoundError
 class FakeStorage:
     def __init__(self) -> None:
         self.chat = ChatResponse(
-            id="chat-1",
+            id=1,
             title="测试会话",
             status="active",
             created_at=datetime(2026, 6, 22, tzinfo=timezone.utc),
@@ -29,10 +29,10 @@ class FakeStorage:
         )
         self.messages: list[ChatMessageResponse] = []
 
-    def get_chat(self, chat_id: str) -> ChatResponse | None:
+    def get_chat(self, chat_id: int) -> ChatResponse | None:
         return self.chat if chat_id == self.chat.id else None
 
-    def get_message(self, chat_id: str, message_id: int) -> ChatMessageResponse | None:
+    def get_message(self, chat_id: int, message_id: int) -> ChatMessageResponse | None:
         for message in self.messages:
             if message.chat_id == chat_id and message.id == message_id:
                 return message
@@ -40,7 +40,7 @@ class FakeStorage:
 
     def get_previous_user_message(
         self,
-        chat_id: str,
+        chat_id: int,
         before_message_id: int,
     ) -> ChatMessageResponse | None:
         previous = [
@@ -52,7 +52,7 @@ class FakeStorage:
 
     def mark_message_synthesized(
         self,
-        chat_id: str,
+        chat_id: int,
         message_id: int,
         synthesis_path: str,
         synthesized_at: datetime,
@@ -89,14 +89,14 @@ class SynthesisServiceTests(unittest.TestCase):
         self.storage.messages = [
             ChatMessageResponse(
                 id=1,
-                chat_id="chat-1",
+                chat_id=1,
                 role="user",
                 content="MySQL 多轮聊天实现？",
                 created_at=datetime(2026, 6, 22, tzinfo=timezone.utc),
             ),
             ChatMessageResponse(
                 id=2,
-                chat_id="chat-1",
+                chat_id=1,
                 role="assistant",
                 content="## 答案\n\n保留 [[PageA]]。",
                 sources=["PageA"],
@@ -106,7 +106,7 @@ class SynthesisServiceTests(unittest.TestCase):
         ]
 
         response = self.service.save_chat_answer(
-            chat_id="chat-1",
+            chat_id=1,
             assistant_message_id=2,
             title=None,
         )
@@ -129,14 +129,14 @@ class SynthesisServiceTests(unittest.TestCase):
         self.storage.messages = [
             ChatMessageResponse(
                 id=1,
-                chat_id="chat-1",
+                chat_id=1,
                 role="user",
                 content="question",
                 created_at=datetime(2026, 6, 22, tzinfo=timezone.utc),
             ),
             ChatMessageResponse(
                 id=2,
-                chat_id="chat-1",
+                chat_id=1,
                 role="assistant",
                 content="answer",
                 created_at=datetime(2026, 6, 22, tzinfo=timezone.utc),
@@ -144,7 +144,7 @@ class SynthesisServiceTests(unittest.TestCase):
         ]
 
         response = self.service.save_chat_answer(
-            chat_id="chat-1",
+            chat_id=1,
             assistant_message_id=2,
             title="Custom Title",
         )
@@ -156,7 +156,7 @@ class SynthesisServiceTests(unittest.TestCase):
         self.storage.messages = [
             ChatMessageResponse(
                 id=1,
-                chat_id="chat-1",
+                chat_id=1,
                 role="user",
                 content="question",
                 created_at=datetime(2026, 6, 22, tzinfo=timezone.utc),
@@ -164,13 +164,13 @@ class SynthesisServiceTests(unittest.TestCase):
         ]
 
         with self.assertRaises(InvalidSynthesisMessageError):
-            self.service.save_chat_answer(chat_id="chat-1", assistant_message_id=1, title=None)
+            self.service.save_chat_answer(chat_id=1, assistant_message_id=1, title=None)
 
     def test_rejects_missing_previous_question(self) -> None:
         self.storage.messages = [
             ChatMessageResponse(
                 id=2,
-                chat_id="chat-1",
+                chat_id=1,
                 role="assistant",
                 content="answer",
                 created_at=datetime(2026, 6, 22, tzinfo=timezone.utc),
@@ -178,20 +178,20 @@ class SynthesisServiceTests(unittest.TestCase):
         ]
 
         with self.assertRaises(SynthesisQuestionNotFoundError):
-            self.service.save_chat_answer(chat_id="chat-1", assistant_message_id=2, title=None)
+            self.service.save_chat_answer(chat_id=1, assistant_message_id=2, title=None)
 
     def test_rejects_duplicate_save(self) -> None:
         self.storage.messages = [
             ChatMessageResponse(
                 id=1,
-                chat_id="chat-1",
+                chat_id=1,
                 role="user",
                 content="question",
                 created_at=datetime(2026, 6, 22, tzinfo=timezone.utc),
             ),
             ChatMessageResponse(
                 id=2,
-                chat_id="chat-1",
+                chat_id=1,
                 role="assistant",
                 content="answer",
                 created_at=datetime(2026, 6, 22, tzinfo=timezone.utc),
@@ -200,13 +200,13 @@ class SynthesisServiceTests(unittest.TestCase):
         ]
 
         with self.assertRaises(SynthesisAlreadyExistsError) as context:
-            self.service.save_chat_answer(chat_id="chat-1", assistant_message_id=2, title=None)
+            self.service.save_chat_answer(chat_id=1, assistant_message_id=2, title=None)
 
         self.assertEqual(context.exception.path, "syntheses/existing.md")
 
     def test_missing_chat_raises_chat_not_found(self) -> None:
         with self.assertRaises(ChatNotFoundError):
-            self.service.save_chat_answer(chat_id="missing", assistant_message_id=2, title=None)
+            self.service.save_chat_answer(chat_id=2, assistant_message_id=2, title=None)
 
 
 if __name__ == "__main__":

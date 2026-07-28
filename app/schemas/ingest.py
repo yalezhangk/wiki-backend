@@ -47,7 +47,7 @@ class IngestLLMResult(BaseModel):
 
 
 class IngestJobResponse(BaseModel):
-    job_id: str = Field(description="Ingest 任务 ID。")
+    job_id: int = Field(gt=0, description="Ingest 任务数字 ID。")
     status: IngestJobStatus = Field(description="任务粗粒度状态；成功仅表示知识文件已写入。")
     stage: IngestStage = Field(description="任务当前真实处理阶段；不包含 Quartz 发布阶段。")
     progress_percent: int = Field(ge=0, le=100, description="当前阶段对应的离散进度，不表示发布进度。")

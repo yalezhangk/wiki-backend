@@ -13,7 +13,7 @@ from app.services.publish_service import PublishNotFoundError
 class FakePublishService:
     def __init__(self) -> None:
         self.job = PublishJobResponse(
-            job_id="publish-1",
+            job_id=1,
             status="queued",
             trigger="automatic",
             change_count=2,
@@ -32,7 +32,7 @@ class FakePublishService:
     def list_jobs(self, limit: int) -> list[PublishJobResponse]:
         return [self.job][:limit]
 
-    def get_job(self, job_id: str) -> PublishJobResponse:
+    def get_job(self, job_id: int) -> PublishJobResponse:
         if job_id != self.job.job_id:
             raise PublishNotFoundError(job_id)
         return self.job
@@ -53,7 +53,7 @@ class PublishApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["pending_change_count"], 2)
-        self.assertEqual(response.json()["active_job"]["job_id"], "publish-1")
+        self.assertEqual(response.json()["active_job"]["job_id"], 1)
 
     def test_post_promotes_current_batch_to_manual(self) -> None:
         response = self.client.post("/api/publish/jobs")
@@ -62,9 +62,12 @@ class PublishApiTests(unittest.TestCase):
         self.assertEqual(response.json()["trigger"], "manual")
 
     def test_missing_job_returns_404(self) -> None:
-        response = self.client.get("/api/publish/jobs/missing")
+        response = self.client.get("/api/publish/jobs/2")
 
         self.assertEqual(response.status_code, 404)
+
+    def test_publish_job_rejects_uuid(self) -> None:
+        self.assertEqual(self.client.get("/api/publish/jobs/publish-1").status_code, 422)
 
 
 if __name__ == "__main__":

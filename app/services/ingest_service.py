@@ -11,7 +11,6 @@ from pathlib import Path
 from queue import Queue
 from tempfile import NamedTemporaryFile
 from typing import Any, Callable, Protocol
-from uuid import uuid4
 
 from fastapi import UploadFile
 from pydantic import ValidationError
@@ -148,7 +147,6 @@ class IngestStorage(Protocol):
     def create_ingest_job(
         self,
         *,
-        job_id: str,
         status: str,
         original_filename: str,
         stored_filename: str,
@@ -157,19 +155,19 @@ class IngestStorage(Protocol):
     ) -> IngestJobResponse:
         ...
 
-    def get_ingest_job(self, job_id: str) -> IngestJobResponse | None:
+    def get_ingest_job(self, job_id: int) -> IngestJobResponse | None:
         ...
 
     def list_ingest_jobs(self, limit: int) -> list[IngestJobResponse]:
         ...
 
-    def mark_ingest_job_running(self, job_id: str, started_at: datetime) -> None:
+    def mark_ingest_job_running(self, job_id: int, started_at: datetime) -> None:
         ...
 
     def update_ingest_job_progress(
         self,
         *,
-        job_id: str,
+        job_id: int,
         stage: str,
         progress_percent: int,
         updated_at: datetime,
@@ -179,7 +177,7 @@ class IngestStorage(Protocol):
     def mark_ingest_job_succeeded(
         self,
         *,
-        job_id: str,
+        job_id: int,
         created_pages: list[str],
         updated_pages: list[str],
         contradictions: list[str],
@@ -188,7 +186,7 @@ class IngestStorage(Protocol):
     ) -> None:
         ...
 
-    def mark_ingest_job_failed(self, *, job_id: str, error: str, finished_at: datetime) -> None:
+    def mark_ingest_job_failed(self, *, job_id: int, error: str, finished_at: datetime) -> None:
         ...
 
 
@@ -217,7 +215,7 @@ class IngestService:
         self._ingest_llm_max_tokens = ingest_llm_max_tokens
         self._publish_service = publish_service
         self._wiki_lock = wiki_lock or threading.RLock()
-        self._queue: Queue[str] = Queue()
+        self._queue: Queue[int] = Queue()
         self._worker: threading.Thread | None = None
         if start_worker:
             self._worker = threading.Thread(target=self._worker_loop, name="ingest-worker", daemon=True)
@@ -247,7 +245,6 @@ class IngestService:
 
         created_at = self._utc_now()
         job = self._storage.create_ingest_job(
-            job_id=str(uuid4()),
             status="queued",
             original_filename=original_filename,
             stored_filename=stored_filename,
@@ -257,7 +254,7 @@ class IngestService:
         self._queue.put(job.job_id)
         return job
 
-    def get_job(self, job_id: str) -> IngestJobResponse:
+    def get_job(self, job_id: int) -> IngestJobResponse:
         job = self._storage.get_ingest_job(job_id)
         if job is None:
             raise IngestNotFoundError(f"ingest job not found: {job_id}")
@@ -277,7 +274,7 @@ class IngestService:
             finally:
                 self._queue.task_done()
 
-    def _run_job(self, job_id: str) -> None:
+    def _run_job(self, job_id: int) -> None:
         job = self.get_job(job_id)
         started_at = self._utc_now()
         self._storage.mark_ingest_job_running(job_id, started_at)
@@ -293,7 +290,7 @@ class IngestService:
             )
             if self._publish_service is not None:
                 try:
-                    self._publish_service.queue_change(source_kind="ingest", source_id=job_id)
+                    self._publish_service.queue_change(source_kind="ingest", source_id=str(job_id))
                 except Exception:
                     LOGGER.exception("Failed to queue Quartz publish after ingest job_id=%s", job_id)
         except Exception as exc:
@@ -304,7 +301,7 @@ class IngestService:
                 finished_at=self._utc_now(),
             )
 
-    def _ingest_source(self, source_path: Path, *, job_id: str) -> dict[str, Any]:
+    def _ingest_source(self, source_path: Path, *, job_id: int) -> dict[str, Any]:
         source = source_path
         if source_path.suffix.lower() != ".md":
             self._update_progress(job_id, "converting", 10)
@@ -366,7 +363,7 @@ class IngestService:
         }
 
 
-    def _update_progress(self, job_id: str, stage: str, progress_percent: int) -> None:
+    def _update_progress(self, job_id: int, stage: str, progress_percent: int) -> None:
         self._storage.update_ingest_job_progress(
             job_id=job_id,
             stage=stage,
@@ -380,7 +377,7 @@ class IngestService:
         prompt: str,
         raw: str,
         source_path: Path,
-        job_id: str,
+        job_id: int,
     ) -> dict[str, Any]:
         self._last_llm_result_raw = raw
         try:
@@ -669,7 +666,7 @@ class IngestService:
         self,
         *,
         source_path: Path,
-        job_id: str,
+        job_id: int,
         label: str,
         content: str,
     ) -> str:

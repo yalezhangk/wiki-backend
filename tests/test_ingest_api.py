@@ -20,7 +20,7 @@ class FakeIngestService:
         self.error: Exception | None = None
         self.jobs = [
             IngestJobResponse(
-                job_id="job-1",
+                job_id=1,
                 status="queued",
                 stage="uploaded",
                 progress_percent=0,
@@ -37,7 +37,7 @@ class FakeIngestService:
             raise self.error
         return self.jobs[0].model_copy(update={"original_filename": file.filename})
 
-    def get_job(self, job_id: str) -> IngestJobResponse:
+    def get_job(self, job_id: int) -> IngestJobResponse:
         if self.error is not None:
             raise self.error
         for job in self.jobs:
@@ -68,7 +68,7 @@ class IngestApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["job_id"], "job-1")
+        self.assertEqual(response.json()["job_id"], 1)
         self.assertEqual(response.json()["status"], "queued")
 
     def test_create_ingest_job_maps_validation_error(self) -> None:
@@ -93,13 +93,13 @@ class IngestApiTests(unittest.TestCase):
         self.assertEqual(response.json()["detail"], "上传文件已存在，请修改文件名后重试: raw/uploads/report.md")
 
     def test_get_ingest_job_returns_job(self) -> None:
-        response = self.client.get("/api/ingest/jobs/job-1")
+        response = self.client.get("/api/ingest/jobs/1")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json(),
             {
-                "job_id": "job-1",
+                "job_id": 1,
                 "status": "queued",
                 "stage": "uploaded",
                 "progress_percent": 0,
@@ -119,7 +119,7 @@ class IngestApiTests(unittest.TestCase):
         )
 
     def test_get_ingest_job_maps_missing_job(self) -> None:
-        response = self.client.get("/api/ingest/jobs/missing")
+        response = self.client.get("/api/ingest/jobs/2")
 
         self.assertEqual(response.status_code, 404)
 
@@ -127,7 +127,10 @@ class IngestApiTests(unittest.TestCase):
         response = self.client.get("/api/ingest/jobs?limit=20")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()[0]["job_id"], "job-1")
+        self.assertEqual(response.json()[0]["job_id"], 1)
+
+    def test_get_ingest_job_rejects_uuid(self) -> None:
+        self.assertEqual(self.client.get("/api/ingest/jobs/job-1").status_code, 422)
 
 
 if __name__ == "__main__":

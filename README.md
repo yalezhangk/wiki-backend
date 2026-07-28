@@ -56,6 +56,7 @@ http://127.0.0.1:8081/docs
 
 ### 当前响应契约基线
 
+- `chats.id`、`chat_messages.chat_id`、`ingest_jobs.job_id`、`publish_jobs.job_id` 与发布状态中的 `job_id` 均为正整数 JSON number。此前 UUID 路径和 UUID 请求体不再兼容，会返回 `422`。
 - 所有 API 时间字段表示 UTC，精确到秒，当前序列化为不带 `Z` 或时区偏移的 ISO 8601 字符串，例如 `2026-07-22T10:01:08`。客户端不得按本地时区解释该字符串。
 - `source_path` 相对于 `WIKI_AGENT_REPO_PATH` 指向的 agent 仓库根目录，例如 `raw/uploads/report.md`。
 - `relevant_pages`、`created_pages`、`updated_pages`、`synthesis_path` 和 Synthesis 响应中的 `path` 都是相对于 `llm-wiki-agent/wiki` 的路径，统一使用 `/` 分隔符。
@@ -110,7 +111,7 @@ Ingest 响应在保留 `status` 的同时提供 `stage`、`progress_percent` 和
 
 ```json
 {
-  "chat_id": "4c992874-bc4a-49d4-85dc-e2c784fb1e61",
+  "chat_id": 42,
   "assistant_message_id": 42,
   "title": "可选标题"
 }
@@ -180,9 +181,39 @@ FLUSH PRIVILEGES;
 - `chats`
 - `chat_messages`
 - `ingest_jobs`
+- `publish_jobs`
+- `publish_changes`
 - 必要索引
 
 MySQL 保存业务元数据，不保存 Wiki Markdown 正文。
+
+### UUID 主键历史迁移
+
+现有数据库若仍使用 UUID 主键，必须在维护窗口完成迁移。先停止 FastAPI、ingest worker 和 publish worker，并完成可恢复的 MySQL 备份；迁移工具不会在服务启动时自动执行。
+
+```powershell
+.venv\Scripts\python.exe -m tools.migrate_uuid_primary_keys migrate --confirm
+```
+
+DGX：
+
+```bash
+.venv/bin/python -m tools.migrate_uuid_primary_keys migrate --confirm
+```
+
+工具会复制数据到数字 ID 影子表，重写 `chat_messages.chat_id`、`publish_changes.publish_job_id` 以及 ingest 类型的 `publish_changes.source_id`，验证后切换表名。原 UUID 表会保留为 `*_uuid_backup`，请先完成 `/api/health`、`/api/chats`、ingest 和 publish smoke test；确认无误后再显式清理备份表：
+
+```powershell
+.venv\Scripts\python.exe -m tools.migrate_uuid_primary_keys finalize --confirm
+```
+
+DGX：
+
+```bash
+.venv/bin/python -m tools.migrate_uuid_primary_keys finalize --confirm
+```
+
+历史 `publish_jobs.release_id` 保持原值，因此已存在的 UUID 命名 Quartz release 目录仍可追溯；新发布任务使用数字目录名。
 
 ## 安装与启动
 
@@ -416,6 +447,15 @@ DGX：
 ```bash
 WIKI_BACKEND_RUN_MYSQL_INTEGRATION=1 \
   .venv/bin/python -m unittest tests.test_mysql_integration -v
+```
+
+UUID 主键迁移集成测试会创建并删除独立数据库，只有在显式设置数据库名后才允许执行；该数据库名不得等于应用数据库：
+
+```powershell
+$env:WIKI_BACKEND_RUN_MYSQL_MIGRATION_INTEGRATION="1"
+$env:WIKI_BACKEND_MYSQL_MIGRATION_TEST_DATABASE="wiki_backend_id_migration_test"
+.venv\Scripts\python.exe -m unittest tests.test_uuid_id_migration -v
+Remove-Item Env:WIKI_BACKEND_RUN_MYSQL_MIGRATION_INTEGRATION, Env:WIKI_BACKEND_MYSQL_MIGRATION_TEST_DATABASE
 ```
 
 ## 安全边界

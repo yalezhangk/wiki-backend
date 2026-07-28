@@ -16,7 +16,7 @@ class QueryServiceTests(unittest.TestCase):
     def _message(self, message_id: int, content: str) -> ChatMessageResponse:
         return ChatMessageResponse(
             id=message_id,
-            chat_id="chat-1",
+            chat_id=1,
             role="user" if message_id % 2 else "assistant",
             content=content,
             created_at=datetime(2026, 6, 17, tzinfo=timezone.utc),

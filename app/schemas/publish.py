@@ -15,13 +15,13 @@ class PublicationResponse(BaseModel):
     """某项 Wiki 写入对应的站点发布状态。"""
 
     status: PublicationStatus
-    job_id: str | None = None
+    job_id: int | None = Field(default=None, gt=0)
     published_at: datetime | None = None
     error: str | None = None
 
 
 class PublishJobResponse(BaseModel):
-    job_id: str
+    job_id: int = Field(gt=0)
     status: PublishJobStatus
     trigger: PublishTrigger
     change_count: int = Field(ge=0)

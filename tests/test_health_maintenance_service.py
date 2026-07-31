@@ -107,7 +107,7 @@ class HealthMaintenanceServiceTests(unittest.TestCase):
                 + EXPECTED_HEALTH["unlogged_source_paths"]
             ):
                 self.assertIn(f"`{path}`", report)
-            self.assertLess(report.index("wiki/drafts/empty.md"), report.index("wiki/drafts/short.md"))
+            self.assertLess(report.index("wiki/syntheses/drafts/empty.md"), report.index("wiki/syntheses/drafts/short.md"))
 
 
 if __name__ == "__main__":

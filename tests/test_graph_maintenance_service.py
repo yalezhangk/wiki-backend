@@ -32,9 +32,10 @@ class GraphMaintenanceServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             wiki = root / "wiki"
-            wiki.mkdir()
-            (wiki / "alpha.md").write_text("---\ntype: concept\ntitle: Alpha\n---\nSee [[Beta]].", encoding="utf-8")
-            (wiki / "beta.md").write_text("---\ntype: entity\n---\nBody", encoding="utf-8")
+            (wiki / "concepts").mkdir(parents=True)
+            (wiki / "entities").mkdir()
+            (wiki / "concepts" / "alpha.md").write_text("---\ntype: concept\ntitle: Alpha\n---\nSee [[Beta]].", encoding="utf-8")
+            (wiki / "entities" / "beta.md").write_text("---\ntype: entity\n---\nBody", encoding="utf-8")
             storage = FakeStorage()
             service = GraphMaintenanceService(storage=storage, wiki_repo_path=root, wiki_lock=threading.RLock())
 
@@ -42,8 +43,8 @@ class GraphMaintenanceServiceTests(unittest.TestCase):
 
             graph = json.loads((root / "graph" / "graph.json").read_text(encoding="utf-8"))
             self.assertEqual(len(graph["nodes"]), 2)
-            self.assertEqual(graph["edges"][0]["from"], "alpha")
-            self.assertEqual(graph["edges"][0]["to"], "beta")
+            self.assertEqual(graph["edges"][0]["from"], "concepts/alpha")
+            self.assertEqual(graph["edges"][0]["to"], "entities/beta")
             self.assertIn("built", graph)
             self.assertIn("markdown", graph["nodes"][0])
             self.assertIn("group", graph["nodes"][0])
@@ -58,8 +59,8 @@ class GraphMaintenanceServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             wiki = root / "wiki"
-            wiki.mkdir()
-            (wiki / "page.md").write_text("Body", encoding="utf-8")
+            (wiki / "sources").mkdir(parents=True)
+            (wiki / "sources" / "page.md").write_text("Body", encoding="utf-8")
 
             GraphMaintenanceService(storage=FakeStorage(), wiki_repo_path=root, wiki_lock=threading.RLock()).run(
                 self._job().model_copy(update={"options": {"infer_relations": False, "save_report": False}})
@@ -96,8 +97,8 @@ class GraphMaintenanceServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             wiki = root / "wiki"
-            wiki.mkdir()
-            (wiki / "page.md").write_text("content", encoding="utf-8")
+            (wiki / "sources").mkdir(parents=True)
+            (wiki / "sources" / "page.md").write_text("content", encoding="utf-8")
             service = GraphMaintenanceService(storage=FakeStorage(), wiki_repo_path=root, wiki_lock=threading.RLock())
             job = self._job().model_copy(update={"options": {"infer_relations": True}})
 
@@ -112,9 +113,9 @@ class GraphMaintenanceServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             wiki = root / "wiki"
-            wiki.mkdir()
-            (wiki / "alpha.md").write_text("[[Beta]]", encoding="utf-8")
-            (wiki / "beta.md").write_text("Body", encoding="utf-8")
+            (wiki / "sources").mkdir(parents=True)
+            (wiki / "sources" / "alpha.md").write_text("[[Beta]]", encoding="utf-8")
+            (wiki / "sources" / "beta.md").write_text("Body", encoding="utf-8")
             service = GraphMaintenanceService(storage=FakeStorage(), wiki_repo_path=root, wiki_lock=threading.RLock())
 
             with patch.dict(sys.modules, {"networkx": None}):
@@ -128,13 +129,13 @@ class GraphMaintenanceServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             wiki = root / "wiki"
-            wiki.mkdir()
-            (wiki / "first.md").write_text("[[Second]]", encoding="utf-8")
-            (wiki / "second.md").write_text("Body", encoding="utf-8")
+            (wiki / "sources").mkdir(parents=True)
+            (wiki / "sources" / "first.md").write_text("[[Second]]", encoding="utf-8")
+            (wiki / "sources" / "second.md").write_text("Body", encoding="utf-8")
             service = GraphMaintenanceService(storage=FakeStorage(), wiki_repo_path=root, wiki_lock=threading.RLock())
             job = self._job().model_copy(update={"options": {"infer_relations": True, "save_report": True}})
 
-            with patch("app.services.graph_maintenance_service.call_llm_fast", return_value='{"edges":[{"to":"second","relationship":"related","confidence":0.9}]}') as caller:
+            with patch("app.services.graph_maintenance_service.call_llm_fast", return_value='{"edges":[{"to":"sources/second","relationship":"related","confidence":0.9}]}') as caller:
                 service.run(job)
             with patch("app.services.graph_maintenance_service.call_llm_fast", side_effect=RuntimeError("must use checkpoint")):
                 service.run(job)
@@ -151,6 +152,20 @@ class GraphMaintenanceServiceTests(unittest.TestCase):
             self.assertIn("function clearSelection", html)
             self.assertIn("stabilizationIterationsDone", html)
             self.assertIn(r"split(/\r?\n/)", html)
+
+    def test_excludes_generated_health_report_from_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            wiki = root / "wiki"
+            (wiki / "sources").mkdir(parents=True)
+            (wiki / "sources" / "source.md").write_text("Source body", encoding="utf-8")
+            (wiki / "health-report.md").write_text("[[source]]", encoding="utf-8")
+
+            GraphMaintenanceService(storage=FakeStorage(), wiki_repo_path=root, wiki_lock=threading.RLock()).run(self._job())
+
+            graph = json.loads((root / "graph" / "graph.json").read_text(encoding="utf-8"))
+            self.assertEqual([node["id"] for node in graph["nodes"]], ["sources/source"])
+            self.assertEqual(graph["edges"], [])
 
 
 if __name__ == "__main__":

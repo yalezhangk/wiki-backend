@@ -13,8 +13,8 @@ from app.llm_config import call_llm_fast
 from app.schemas.maintenance import MaintenanceJobResponse
 from app.services.graph_html_renderer import render_graph_html
 from app.services.maintenance_service import MaintenanceTaskResult
+from app.services.wiki_page_policy import iter_knowledge_pages
 
-_EXCLUDED_FILENAMES = {"index.md", "log.md", "lint-report.md"}
 _TYPE_COLORS = {
     "source": "#4CAF50",
     "entity": "#2196F3",
@@ -106,7 +106,7 @@ class GraphMaintenanceService:
     def _pages(self) -> list[Path]:
         if not self._wiki_dir.is_dir():
             raise RuntimeError("Wiki directory is unavailable")
-        return [path for path in self._wiki_dir.rglob("*.md") if path.name not in _EXCLUDED_FILENAMES]
+        return list(iter_knowledge_pages(self._wiki_dir))
 
     def _node(self, path: Path, content: str) -> dict[str, Any]:
         page_type = self._frontmatter(content, "type") or "unknown"
@@ -275,7 +275,12 @@ class GraphMaintenanceService:
             degree[edge["to"]] += 1
         orphans = sorted(node_id for node_id, value in degree.items() if value == 0)
         degree_values = list(degree.values())
-        threshold = statistics.mean(degree_values) + (2 * statistics.stdev(degree_values) if len(degree_values) > 1 else 0)
+        threshold = (
+            statistics.mean(degree_values)
+            + (2 * statistics.stdev(degree_values) if len(degree_values) > 1 else 0)
+            if degree_values
+            else 0
+        )
         god_nodes = sorted(((node_id, value) for node_id, value in degree.items() if value > threshold), key=lambda item: item[1], reverse=True)
         community_members: dict[int, list[str]] = {}
         for node_id, group in communities.items():

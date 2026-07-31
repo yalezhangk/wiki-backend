@@ -16,6 +16,7 @@ router = APIRouter(prefix="/api/quality", tags=["quality"])
     description=(
         "只读聚合最近的 `health-report.md`、`lint-report.md` 和 `graph-report.md`，"
         "并结合最近 maintenance 任务标记可选 LLM 阶段是否不完整。\n\n"
+        "报告仅作为质量快照的定向输入，不会回流为 Health、Graph、Lint 或问答的知识页。\n\n"
         "该接口不会运行巡检、调用 LLM、写入 Wiki、创建任务或触发 Quartz 发布。"
         "报告缺失、过期或无法解析时仍返回 `200`，在 `snapshot.checks` 中给出对应状态；"
         "只有 Wiki 根目录不可访问时返回 `503`。"

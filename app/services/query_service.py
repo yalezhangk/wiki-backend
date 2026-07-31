@@ -12,6 +12,7 @@ from app.llm_config import call_llm_fast, call_llm_main
 from app.prompts import load_prompt, render_prompt
 from app.schemas.chat import ChatMessageResponse
 from app.schemas.query import CitationKind, CitationResponse, QueryResult
+from app.services.wiki_page_policy import is_knowledge_page
 
 LOGGER = logging.getLogger(__name__)
 INLINE_CITATION_PATTERN = re.compile(r"\[(\d+)\]")
@@ -79,7 +80,7 @@ def find_relevant_pages(question: str, index_content: str, wiki_dir: Path, graph
 
         if matched:
             page = resolve_wiki_page(wiki_dir, href)
-            if page is not None and page not in relevant:
+            if page is not None and is_knowledge_page(wiki_dir=wiki_dir, path=page) and page not in relevant:
                 relevant.append(page)
 
     if graph_json.exists() and relevant:
@@ -95,13 +96,13 @@ def find_relevant_pages(question: str, index_content: str, wiki_dir: Path, graph
                         neighbors.add(edge["from"])
             for node_id in neighbors:
                 neighbor = resolve_wiki_page(wiki_dir, f"{node_id}.md")
-                if neighbor is not None and neighbor not in relevant:
+                if neighbor is not None and is_knowledge_page(wiki_dir=wiki_dir, path=neighbor) and neighbor not in relevant:
                     relevant.append(neighbor)
         except (json.JSONDecodeError, KeyError, TypeError):
             LOGGER.warning("Failed to expand relevant pages from graph.json", exc_info=True)
 
     overview = wiki_dir / "overview.md"
-    if overview.exists() and overview not in relevant:
+    if is_knowledge_page(wiki_dir=wiki_dir, path=overview) and overview not in relevant:
         relevant.insert(0, overview)
     return relevant[:15]
 
@@ -222,7 +223,8 @@ class QueryService:
         return selected_pages or relevant_pages
 
     def _resolve_wiki_page(self, value: str) -> Path | None:
-        return resolve_wiki_page(self._wiki_dir, value)
+        candidate = resolve_wiki_page(self._wiki_dir, value)
+        return candidate if candidate is not None and self._is_safe_wiki_page(candidate) else None
 
     def _build_citations(
         self,
@@ -313,7 +315,7 @@ class QueryService:
             resolved.relative_to(self._wiki_dir.resolve())
         except (OSError, ValueError):
             return False
-        return resolved.is_file() and resolved.suffix.lower() == ".md"
+        return is_knowledge_page(wiki_dir=self._wiki_dir, path=resolved)
 
     def _citation_from_page(self, page: Path) -> CitationResponse:
         relative = page.relative_to(self._wiki_dir).as_posix()

@@ -20,6 +20,7 @@ from app.llm_config import LLMConfigError, LLMResponseTruncatedError, call_llm_m
 from app.prompts import load_prompt, render_prompt
 from app.schemas.ingest import IngestJobResponse, IngestLLMResult, IngestValidation
 from app.services.publish_service import PublishService
+from app.services.wiki_page_policy import iter_knowledge_pages
 
 LOGGER = logging.getLogger(__name__)
 
@@ -621,11 +622,7 @@ class IngestService:
         self._atomic_write(self._log_file, formatted_entry + "\n\n" + existing)
 
     def _validate_ingest(self, changed_pages: list[str]) -> IngestValidation:
-        existing_pages = {
-            path.stem.lower()
-            for path in self._wiki_dir.rglob("*.md")
-            if path.name not in {"index.md", "log.md", "lint-report.md"}
-        }
+        existing_pages = {path.stem.lower() for path in iter_knowledge_pages(self._wiki_dir)}
         index_content = self._read_text(self._index_file).lower()
         broken_links: list[tuple[str, str]] = []
         unindexed: list[str] = []

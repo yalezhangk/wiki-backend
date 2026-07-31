@@ -26,6 +26,9 @@ router = APIRouter(prefix="/api/maintenance", tags=["maintenance"])
     description=(
         "创建单个异步维护任务，并立即返回任务审计记录。`202 Accepted` 只表示已入队；"
         "请轮询 `GET /api/maintenance/jobs/{job_id}` 直到 `status` 为 `succeeded` 或 `failed`。\n\n"
+        "维护范围仅包含 `wiki/overview.md` 与 `wiki/sources/`、`wiki/entities/`、"
+        "`wiki/concepts/`、`wiki/syntheses/` 下的知识页。`index.md`、`log.md` 是专用输入；"
+        "根目录 Health/Lint 报告和 Graph 报告是运行产物，不会作为知识页扫描或图节点。\n\n"
         "任务与选项：\n"
         "- `health`：检查 Wiki 页面、索引和日志覆盖；`save_report` 默认 `true`，会写入 `wiki/health-report.md`。"
         '若仅验证逻辑可提交 `{"task_kind":"health","options":{"save_report":false}}`，但仍会创建 MySQL 审计任务。\n'

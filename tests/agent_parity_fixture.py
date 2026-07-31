@@ -6,14 +6,14 @@ from pathlib import Path
 
 EXPECTED_HEALTH = {
     "total_pages": 9,
-    "empty_paths": ["wiki/drafts/empty.md", "wiki/drafts/short.md"],
+    "empty_paths": ["wiki/syntheses/drafts/empty.md", "wiki/syntheses/drafts/short.md"],
     "stale_index_paths": ["wiki/sources/missing.md"],
     "missing_index_paths": [
         "wiki/concepts/conceptone.md",
-        "wiki/drafts/empty.md",
-        "wiki/drafts/short.md",
+        "wiki/syntheses/drafts/empty.md",
+        "wiki/syntheses/drafts/short.md",
         "wiki/entities/entitytwo.md",
-        "wiki/notes/deep/nested.md",
+        "wiki/syntheses/notes/deep/nested.md",
         "wiki/sources/beta.md",
     ],
     "unlogged_source_paths": ["wiki/sources/beta.md"],
@@ -24,23 +24,23 @@ EXPECTED_GRAPH = {
         frozenset(("sources/alpha", "entities/entityone")),
         frozenset(("sources/beta", "entities/entityone")),
         frozenset(("entities/entitytwo", "concepts/conceptone")),
-        frozenset(("entities/entitytwo", "notes/deep/nested")),
-        frozenset(("concepts/conceptone", "notes/deep/nested")),
+        frozenset(("entities/entitytwo", "syntheses/notes/deep/nested")),
+        frozenset(("concepts/conceptone", "syntheses/notes/deep/nested")),
     },
     "phantom_hub": "missinghub",
 }
 EXPECTED_LINT = {
-    "orphan_pages": {"sources/beta", "drafts/empty", "drafts/short"},
+    "orphan_pages": {"sources/beta", "syntheses/drafts/empty", "syntheses/drafts/short"},
     "broken_link_pages": {"sources/alpha", "sources/beta", "entities/entityone"},
     "missing_entity": "missinghub",
-    "sparse_pages": {"drafts/empty", "drafts/short"},
+    "sparse_pages": {"syntheses/drafts/empty", "syntheses/drafts/short"},
 }
 
 
 def create_agent_parity_wiki(root: Path) -> Path:
     """创建覆盖 Agent 三项巡检边界的最小 Wiki，不调用 Agent 或 LLM。"""
     wiki = root / "wiki"
-    for relative in ("sources", "entities", "concepts", "notes/deep", "drafts"):
+    for relative in ("sources", "entities", "concepts", "syntheses/notes/deep", "syntheses/drafts"):
         (wiki / relative).mkdir(parents=True, exist_ok=True)
     (wiki / "index.md").write_text(
         "# Wiki Index\n\n- [Alpha](sources/alpha.md)\n- [Entity One](entities/entityone.md)\n"
@@ -56,9 +56,9 @@ def create_agent_parity_wiki(root: Path) -> Path:
     _write_page(wiki / "entities/entityone.md", "entity", "Entity One", "[[alpha]] [[missinghub]]", "Entity one evidence.")
     _write_page(wiki / "entities/entitytwo.md", "entity", "Entity Two", "[[conceptone]] [[nested]]", "Entity two evidence.")
     _write_page(wiki / "concepts/conceptone.md", "concept", "Concept One", "[[entitytwo]] [[nested]]", "Concept evidence.")
-    _write_page(wiki / "notes/deep/nested.md", "unknown", "Nested", "[[conceptone]] [[entitytwo]]", "Nested evidence.")
-    (wiki / "drafts/empty.md").write_text("---\ntitle: Empty\n---\n", encoding="utf-8")
-    (wiki / "drafts/short.md").write_text("---\ntitle: Short\n---\n\nTiny.\n", encoding="utf-8")
+    _write_page(wiki / "syntheses/notes/deep/nested.md", "synthesis", "Nested", "[[conceptone]] [[entitytwo]]", "Nested evidence.")
+    (wiki / "syntheses/drafts/empty.md").write_text("---\ntitle: Empty\n---\n", encoding="utf-8")
+    (wiki / "syntheses/drafts/short.md").write_text("---\ntitle: Short\n---\n\nTiny.\n", encoding="utf-8")
     (wiki / "overview.md").write_text("# Overview\n\n" + "Overview context. " * 10, encoding="utf-8")
     return wiki
 

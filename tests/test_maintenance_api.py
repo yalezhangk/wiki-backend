@@ -116,6 +116,7 @@ class MaintenanceApiTests(unittest.TestCase):
         self.assertIn("轮询", create_job["description"])
         self.assertIn("共享 Wiki", create_job["description"])
         self.assertIn("selected_page_paths", create_job["description"])
+        self.assertIn("运行产物", create_job["description"])
         self.assertIn("save_report", schema["properties"]["options"]["description"])
         self.assertIn("selected_page_paths", schema["properties"]["options"]["description"])
         summary = document["components"]["schemas"]["MaintenanceJobResponse"]["properties"]["result_summary"]

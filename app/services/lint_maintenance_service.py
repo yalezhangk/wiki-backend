@@ -16,8 +16,8 @@ from pydantic import BaseModel, Field, ValidationError
 from app.llm_config import call_llm_main
 from app.schemas.maintenance import MaintenanceJobResponse
 from app.services.maintenance_service import MaintenanceTaskResult
+from app.services.wiki_page_policy import iter_knowledge_pages
 
-_EXCLUDED = {"health-report.md", "index.md", "lint-report.md", "log.md"}
 _CONFIDENCE_LABELS = {"high": 0.9, "medium": 0.6, "low": 0.3}
 LOGGER = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ class LintMaintenanceService:
     def run(self, job: MaintenanceJobResponse) -> MaintenanceTaskResult:
         with self._lock:
             self._progress(job.job_id, "loading_wiki", 10)
-            pages = [path for path in self._wiki.rglob("*.md") if path.name not in _EXCLUDED]
+            pages = list(iter_knowledge_pages(self._wiki))
             content = {path: path.read_text(encoding="utf-8") for path in pages}
             hashes = {path.relative_to(self._wiki).as_posix(): hashlib.sha256(value.encode()).hexdigest() for path, value in content.items()}
             states = self._storage.get_maintenance_page_states()

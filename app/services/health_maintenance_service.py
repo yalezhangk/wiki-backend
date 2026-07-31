@@ -9,9 +9,9 @@ from typing import Any, Protocol
 
 from app.schemas.maintenance import MaintenanceJobResponse
 from app.services.maintenance_service import MaintenanceTaskResult
+from app.services.wiki_page_policy import iter_knowledge_pages
 
 STUB_THRESHOLD_CHARS = 100
-_EXCLUDED_FILENAMES = {"index.md", "log.md", "lint-report.md", "health-report.md"}
 
 
 class HealthMaintenanceStorage(Protocol):
@@ -81,11 +81,7 @@ class HealthMaintenanceService:
     def _all_wiki_pages(self) -> list[Path]:
         if not self._wiki_dir.is_dir():
             raise RuntimeError("Wiki directory is unavailable")
-        return sorted(
-            path
-            for path in self._wiki_dir.rglob("*.md")
-            if path.name not in _EXCLUDED_FILENAMES
-        )
+        return list(iter_knowledge_pages(self._wiki_dir))
 
     def _check_empty_files(self, pages: list[Path]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []

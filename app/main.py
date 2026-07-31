@@ -151,7 +151,8 @@ def create_app(
             "- `publish`：异步构建 Quartz 静态站点；入库成功不等于页面已发布。"
             "\n\n"
             "- `maintenance`：受控的异步知识库维护任务。创建接口仅入队，需通过任务查询接口轮询状态；"
-            "health 默认写 `health-report.md`，graph 会写 graph artifact，lint 会写报告与 log。"
+            "health 默认写 `health-report.md`，graph 会写 graph artifact，lint 会写报告与 log；"
+            "运行报告不会作为知识页重新参与维护或问答。"
             "\n\n"
             "- `quality`：最近质量报告的只读快照。该接口不会执行 maintenance 任务、调用 LLM、写入 Wiki 或触发 Quartz 发布。"
         ),
@@ -223,6 +224,9 @@ def create_app(
         summary="执行单轮知识库问答",
         description=(
             "接收一个用户问题，调用知识库检索与 LLM 生成最终答案。"
+            "\n\n"
+            "仅检索 `overview.md` 与 sources、entities、concepts、syntheses 目录中的知识页；"
+            "不会将 index、log 或运行报告作为回答引用。"
             "\n\n"
             "该接口是无状态的："
             "\n"

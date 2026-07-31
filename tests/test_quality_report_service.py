@@ -33,8 +33,8 @@ class QualityReportServiceTests(unittest.TestCase):
     def test_missing_reports_are_explicit_and_api_never_runs_maintenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            (root / "wiki").mkdir()
-            (root / "wiki" / "page.md").write_text("body", encoding="utf-8")
+            (root / "wiki" / "sources").mkdir(parents=True)
+            (root / "wiki" / "sources" / "page.md").write_text("body", encoding="utf-8")
             service = QualityReportService(wiki_repo_path=root, stale_after_hours=24)
 
             result = service.get_latest()
@@ -50,7 +50,8 @@ class QualityReportServiceTests(unittest.TestCase):
             graph = root / "graph"
             wiki.mkdir()
             graph.mkdir()
-            (wiki / "page.md").write_text("body", encoding="utf-8")
+            (wiki / "sources").mkdir()
+            (wiki / "sources" / "page.md").write_text("body", encoding="utf-8")
             (wiki / "health-report.md").write_text("## Empty / Stub Files (2 found)\n## Index Sync (3 issues)\n## Log Coverage (1 source pages without log entry)\n", encoding="utf-8")
             (wiki / "lint-report.md").write_text("# Lint\n- This Markdown line must not become a finding.\n", encoding="utf-8")
             (graph / "graph-report.md").write_text("- Orphan nodes: 1\n- Hub nodes: 2\n", encoding="utf-8")
@@ -100,7 +101,8 @@ class QualityReportServiceTests(unittest.TestCase):
             graph = root / "graph"
             wiki.mkdir()
             graph.mkdir()
-            (wiki / "page.md").write_text("body", encoding="utf-8")
+            (wiki / "sources").mkdir()
+            (wiki / "sources" / "page.md").write_text("body", encoding="utf-8")
             (graph / "graph-report.md").write_text("## 🔴 Orphan Nodes (2 pages, 50.0%)\n## 🟠 Phantom Hubs (referenced but non-existent pages) (1)\n", encoding="utf-8")
 
             result = QualityReportService(wiki_repo_path=root, stale_after_hours=24).get_latest()
@@ -124,6 +126,7 @@ class QualityReportServiceTests(unittest.TestCase):
 
         self.assertIn("只读", latest["description"])
         self.assertIn("不会运行巡检", latest["description"])
+        self.assertIn("不会回流", latest["description"])
         self.assertIn("总体状态", schema["properties"]["snapshot"]["description"])
 
 

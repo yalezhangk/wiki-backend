@@ -46,6 +46,16 @@ class QueryServiceTests(unittest.TestCase):
         self.assertIn("[1] entities/First.md", prompt)
         self.assertIn("[2] sources/second.md", prompt)
 
+    def test_openapi_documents_query_knowledge_page_scope(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from app.main import create_app
+
+        document = TestClient(create_app(initialize_storage=False)).get("/openapi.json").json()
+        query = document["paths"]["/api/query"]["post"]
+
+        self.assertIn("不会将 index、log 或运行报告", query["description"])
+
     def test_chat_answer_prompt_uses_actual_wiki_link_references(self) -> None:
         citation = CitationResponse(
             path="entities/MDC4.md",
@@ -172,12 +182,12 @@ class QueryServiceTests(unittest.TestCase):
     def test_build_citations_falls_back_for_missing_or_unknown_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            page = root / "wiki" / "misc" / "中文说明.md"
+            page = root / "wiki" / "overview.md"
             page.parent.mkdir(parents=True)
             page.write_text("# 中文说明标题\n\n正文\n", encoding="utf-8")
             service = QueryService(root)
 
-            citations = service._build_citations(sources=["中文说明"], relevant_pages=[page])
+            citations = service._build_citations(sources=["overview"], relevant_pages=[page])
 
         self.assertEqual(citations[0].title, "中文说明标题")
         self.assertEqual(citations[0].kind, "page")
@@ -185,7 +195,7 @@ class QueryServiceTests(unittest.TestCase):
     def test_build_citations_maps_unknown_frontmatter_type_to_page(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            page = root / "wiki" / "misc" / "mystery.md"
+            page = root / "wiki" / "overview.md"
             page.parent.mkdir(parents=True)
             page.write_text(
                 '---\ntitle: "Mystery"\ntype: unexpected\n---\n',
@@ -193,7 +203,7 @@ class QueryServiceTests(unittest.TestCase):
             )
             service = QueryService(root)
 
-            citations = service._build_citations(sources=["mystery"], relevant_pages=[page])
+            citations = service._build_citations(sources=["overview"], relevant_pages=[page])
 
         self.assertEqual(citations[0].title, "Mystery")
         self.assertEqual(citations[0].kind, "page")
@@ -319,6 +329,23 @@ class QueryServiceTests(unittest.TestCase):
 
             self.assertIsNone(service._resolve_wiki_page("../secret.md"))
             self.assertIsNone(service._resolve_wiki_page(str(outside.resolve())))
+
+    def test_resolve_wiki_page_rejects_control_and_report_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wiki = root / "wiki"
+            (wiki / "sources").mkdir(parents=True)
+            for relative in ("index.md", "log.md", "health-report.md", "lint-report.md", "notes/draft.md"):
+                path = wiki / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("control", encoding="utf-8")
+            source = wiki / "sources" / "source.md"
+            source.write_text("knowledge", encoding="utf-8")
+            service = QueryService(root)
+
+            for relative in ("index.md", "log.md", "health-report.md", "lint-report.md", "notes/draft.md"):
+                self.assertIsNone(service._resolve_wiki_page(relative))
+            self.assertEqual(service._resolve_wiki_page("sources/source.md"), source)
 
 
 if __name__ == "__main__":

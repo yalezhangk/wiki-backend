@@ -82,8 +82,8 @@ class LintMaintenanceServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             wiki = root / "wiki"
-            wiki.mkdir()
-            (wiki / "page.md").write_text("Content", encoding="utf-8")
+            (wiki / "sources").mkdir(parents=True)
+            (wiki / "sources" / "page.md").write_text("Content", encoding="utf-8")
             now = datetime(2026, 7, 30, 12)
             job = MaintenanceJobResponse(
                 job_id=5,
@@ -118,10 +118,10 @@ class LintMaintenanceServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             wiki = root / "wiki"
-            wiki.mkdir()
-            (wiki / "a.md").write_text("[[Missing]]", encoding="utf-8")
-            (wiki / "b.md").write_text("[[Missing]]", encoding="utf-8")
-            (wiki / "c.md").write_text("[[Missing]]", encoding="utf-8")
+            (wiki / "sources").mkdir(parents=True)
+            (wiki / "sources" / "a.md").write_text("[[Missing]]", encoding="utf-8")
+            (wiki / "sources" / "b.md").write_text("[[Missing]]", encoding="utf-8")
+            (wiki / "sources" / "c.md").write_text("[[Missing]]", encoding="utf-8")
             storage = FakeStorage()
             now = datetime(2026, 7, 29, 12)
             job = MaintenanceJobResponse(job_id=1, task_kind="lint", status="running", result_state="unavailable", trigger="manual", stage="starting", progress_percent=5, options={"semantic_analysis": False}, result_summary={}, created_at=now, updated_at=now)
@@ -218,9 +218,9 @@ class LintMaintenanceServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             wiki = root / "wiki"
-            wiki.mkdir()
+            (wiki / "sources").mkdir(parents=True)
             for index in range(21):
-                (wiki / f"page-{index:02}.md").write_text("x" * 1600, encoding="utf-8")
+                (wiki / "sources" / f"page-{index:02}.md").write_text("x" * 1600, encoding="utf-8")
             now = datetime(2026, 7, 30, 12)
             job = MaintenanceJobResponse(job_id=2, task_kind="lint", status="running", result_state="unavailable", trigger="manual", stage="starting", progress_percent=5, options={"semantic_analysis": True, "semantic_mode": "agent_compat"}, result_summary={}, created_at=now, updated_at=now)
 

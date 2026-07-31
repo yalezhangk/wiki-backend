@@ -13,9 +13,9 @@ from app.schemas.quality import (
     QualityResponse,
     QualitySnapshotResponse,
 )
+from app.services.wiki_page_policy import iter_knowledge_pages
 
 LOGGER = logging.getLogger(__name__)
-_EXCLUDED_FILENAMES = {"index.md", "log.md", "health-report.md", "lint-report.md"}
 _LINT_FINDING_CATEGORIES = {
     "orphan": ("structure", "导航孤儿页面", "结构完整性"),
     "broken_link": ("structure", "失效 WikiLink", "结构完整性"),
@@ -47,7 +47,7 @@ class QualityReportService:
     def get_latest(self) -> QualityResponse:
         if not self._wiki_dir.is_dir():
             raise RuntimeError("Wiki directory is unavailable")
-        page_count = len([path for path in self._wiki_dir.rglob("*.md") if path.name not in _EXCLUDED_FILENAMES])
+        page_count = len(list(iter_knowledge_pages(self._wiki_dir)))
         checks = {
             "health": self._check(self._wiki_dir / "health-report.md", "结构检查"),
             "lint": self._check(self._wiki_dir / "lint-report.md", "语义巡检"),

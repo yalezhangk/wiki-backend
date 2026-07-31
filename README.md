@@ -45,6 +45,14 @@ ECS Nginx :8080
 - `GET /api/publish/status`：读取待发布变更、当前构建和最近成功发布。
 - `POST /api/publish/jobs`：立即构建并发布当前 Wiki。
 - `GET /api/publish/jobs*`：读取发布任务历史与详情。
+- `POST /api/maintenance/jobs`：创建单项 Wiki 维护任务，返回 `202 Accepted` 仅表示入队。
+- `GET /api/maintenance/jobs*`：读取维护任务的审计状态与结构化摘要，不返回原始报告正文。
+- `POST /api/maintenance/workflows/quality`：创建 `health → graph → lint` 依赖工作流。
+- `GET /api/quality/latest`：只读最近质量报告快照；不会运行巡检、调用 LLM、写 Wiki 或发布 Quartz。
+
+`/api/maintenance/*` 是管理接口。Health、显式 WikiLink Graph 和 Lint 的确定性检查均在单 worker 中执行；直接创建 Graph 任务的 `infer_relations` 默认 `true`，会调用后端自有 LLM 配置并可能产生费用，`save_report` 默认 `true`；质量工作流仍显式关闭 Graph 推理以避免批量执行产生模型调用。Lint 的导航孤儿只在页面没有任何可解析的 WikiLink 或本地 Markdown 入链时告警；只缺 WikiLink、但可由 Markdown 索引访问的页面记录为 `graph_orphan` 信息项。`health-report.md` 等生成报告不参与 lint 页面检查。Lint 的 `semantic_mode=agent_compat` 会复刻 Agent 的前 20 页、每页 1500 字符 Markdown 语义检查。`delta`、`risk`、`full` 与 `selected` 是后端扩展语义模式，不属于 Agent 兼容性承诺。Graph 推断和 Lint 语义阶段仅在相应选项开启时调用后端自有 LLM 配置。任一可选 LLM 阶段失败时，确定性产物仍保留，任务以 `succeeded + partial` 标记，不能将语义结论当作可用结果。DGX 与 ECS Nginx 必须在 HTTPS、认证和限流配置完成前拒绝该前缀的公网访问。
+
+质量快照以报告文件修改时间判断新鲜度。可通过 `WIKI_BACKEND_QUALITY_STALE_AFTER_HOURS` 调整阈值，默认 `168` 小时；报告缺失、过期或解析失败均以领域状态返回 `200`，只有 Wiki 根目录不可访问时返回 `503`。
 
 服务启动后可查看 FastAPI 文档：
 
@@ -183,6 +191,9 @@ FLUSH PRIVILEGES;
 - `ingest_jobs`
 - `publish_jobs`
 - `publish_changes`
+- `maintenance_jobs`
+- `maintenance_page_state`
+- `maintenance_findings`
 - 必要索引
 
 MySQL 保存业务元数据，不保存 Wiki Markdown 正文。

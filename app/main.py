@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 
 from app.api.chats import router as chats_router
 from app.api.ingest import router as ingest_router
+from app.api.maintenance import router as maintenance_router
+from app.api.quality import router as quality_router
 from app.api.publish import router as publish_router
 from app.api.synthesis import router as synthesis_router
 from app.config import settings
@@ -20,6 +22,11 @@ from app.schemas.query import QueryRequest, QueryResponse
 from app.services.chat_service import ChatService
 from app.services.chat_turn_service import ChatTurnService
 from app.services.ingest_service import IngestService
+from app.services.health_maintenance_service import HealthMaintenanceService
+from app.services.graph_maintenance_service import GraphMaintenanceService
+from app.services.lint_maintenance_service import LintMaintenanceService
+from app.services.maintenance_service import MaintenanceService
+from app.services.quality_report_service import QualityReportService
 from app.services.publish_service import PublishService
 from app.services.query_service import QueryService, QueryServiceError
 from app.services.synthesis_service import SynthesisService
@@ -38,6 +45,7 @@ def create_app(
     ingest_service: IngestService | None = None,
     publish_service: PublishService | None = None,
     synthesis_service: SynthesisService | None = None,
+    maintenance_service: MaintenanceService | None = None,
     initialize_storage: bool = True,
 ) -> FastAPI:
     @asynccontextmanager
@@ -55,6 +63,12 @@ def create_app(
             app.state.chat_service = ChatService(storage)
         if not hasattr(app.state, "query_service"):
             app.state.query_service = QueryService(Path(settings.llm_wiki_repo_path))
+        if not hasattr(app.state, "quality_report_service"):
+            app.state.quality_report_service = QualityReportService(
+                wiki_repo_path=Path(settings.llm_wiki_repo_path),
+                stale_after_hours=settings.quality_stale_after_hours,
+                maintenance_storage=storage,
+            )
         if not hasattr(app.state, "wiki_lock"):
             app.state.wiki_lock = threading.RLock()
         if not hasattr(app.state, "publish_service"):
@@ -91,6 +105,29 @@ def create_app(
                 publish_service=app.state.publish_service,
                 wiki_lock=app.state.wiki_lock,
             )
+        if app.state.maintenance_service is None:
+            if app.state.storage_ready and app.state.initialize_storage:
+                health_service = HealthMaintenanceService(
+                    storage=storage,
+                    wiki_repo_path=Path(settings.llm_wiki_repo_path),
+                    wiki_lock=app.state.wiki_lock,
+                )
+                graph_service = GraphMaintenanceService(
+                    storage=storage,
+                    wiki_repo_path=Path(settings.llm_wiki_repo_path),
+                    wiki_lock=app.state.wiki_lock,
+                )
+                lint_service = LintMaintenanceService(
+                    storage=storage,
+                    wiki_repo_path=Path(settings.llm_wiki_repo_path),
+                    wiki_lock=app.state.wiki_lock,
+                )
+                app.state.maintenance_service = MaintenanceService(
+                    storage=storage,
+                    handlers={"health": health_service.run, "graph": graph_service.run, "lint": lint_service.run},
+                )
+            else:
+                app.state.maintenance_service = None
         LOGGER.info("wiki-backend started")
         yield
 
@@ -99,7 +136,7 @@ def create_app(
         description=(
             "Wiki Backend API，提供健康检查、知识库问答、聊天会话、文档入库和分析保存能力。"
             "\n\n"
-            "接口分为五类："
+            "接口分为七类："
             "\n"
             "- `health`：用于服务存活检查。"
             "\n"
@@ -112,10 +149,21 @@ def create_app(
             "- `synthesis`：根据已持久化的助手消息生成 Wiki Synthesis，不接收回答正文。"
             "\n\n"
             "- `publish`：异步构建 Quartz 静态站点；入库成功不等于页面已发布。"
+            "\n\n"
+            "- `maintenance`：受控的异步知识库维护任务。创建接口仅入队，需通过任务查询接口轮询状态；"
+            "health 默认写 `health-report.md`，graph 会写 graph artifact，lint 会写报告与 log。"
+            "\n\n"
+            "- `quality`：最近质量报告的只读快照。该接口不会执行 maintenance 任务、调用 LLM、写入 Wiki 或触发 Quartz 发布。"
         ),
         lifespan=lifespan,
     )
     app.state.initialize_storage = initialize_storage
+    app.state.maintenance_service = maintenance_service
+    app.state.quality_report_service = QualityReportService(
+        wiki_repo_path=Path(settings.llm_wiki_repo_path),
+        stale_after_hours=settings.quality_stale_after_hours,
+        maintenance_storage=storage,
+    )
 
     app.add_middleware(
         CORSMiddleware,
@@ -205,6 +253,8 @@ def create_app(
 
     app.include_router(chats_router)
     app.include_router(ingest_router)
+    app.include_router(maintenance_router)
+    app.include_router(quality_router)
     app.include_router(publish_router)
     app.include_router(synthesis_router)
     return app

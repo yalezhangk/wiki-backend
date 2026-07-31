@@ -5,4 +5,5 @@ pydantic==2.11.7
 pydantic-settings==2.10.1
 litellm==1.82.6
 PyMySQL==1.1.1
+networkx==3.4.2
 python-multipart==0.0.20

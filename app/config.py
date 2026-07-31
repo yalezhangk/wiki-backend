@@ -75,6 +75,11 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias="WIKI_BACKEND_PUBLISH_MAX_DELAY_SECONDS",
     )
+    quality_stale_after_hours: int = Field(
+        default=168,
+        gt=0,
+        validation_alias="WIKI_BACKEND_QUALITY_STALE_AFTER_HOURS",
+    )
     llm_fast_provider: str = Field(
         default="deepseek",
         validation_alias="WIKI_BACKEND_LLM_FAST_PROVIDER",

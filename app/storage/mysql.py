@@ -10,6 +10,12 @@ from app.schemas.chat import ChatMessageResponse, ChatResponse
 from app.schemas.ingest import IngestJobResponse, IngestValidation
 from app.schemas.query import CitationResponse
 from app.schemas.publish import PublicationResponse, PublishJobResponse, PublishStatusResponse
+from app.schemas.maintenance import (
+    MaintenanceJobResponse,
+    MaintenanceResultState,
+    MaintenanceTaskKind,
+    MaintenanceTrigger,
+)
 
 
 class StorageError(RuntimeError):
@@ -129,6 +135,59 @@ class MySQLStorage:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """
                 )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS maintenance_jobs (
+                        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT COMMENT '维护任务数字自增主键',
+                        task_kind VARCHAR(16) NOT NULL COMMENT '维护任务类型：health、graph或lint',
+                        status VARCHAR(16) NOT NULL COMMENT '任务状态：queued、running、succeeded或failed',
+                        result_state VARCHAR(16) NOT NULL DEFAULT 'unavailable' COMMENT '结果完整性：unavailable、partial或complete',
+                        trigger_kind VARCHAR(16) NOT NULL COMMENT '触发方式：manual或workflow',
+                        workflow_id CHAR(36) NULL COMMENT '所属质量工作流UUID',
+                        depends_on_job_id BIGINT UNSIGNED NULL COMMENT '前置依赖维护任务ID',
+                        stage VARCHAR(32) NOT NULL DEFAULT 'queued' COMMENT '当前执行阶段',
+                        progress_percent TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '任务完成百分比（0至100）',
+                        request_options JSON NOT NULL COMMENT '创建任务时的选项（JSON）',
+                        result_summary JSON NOT NULL COMMENT '任务完成后的结构化结果摘要（JSON）',
+                        error TEXT NULL COMMENT '安全截断后的失败错误摘要',
+                        created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
+                        started_at DATETIME NULL COMMENT '开始执行时间（UTC）',
+                        updated_at DATETIME NOT NULL COMMENT '最后更新时间（UTC）',
+                        finished_at DATETIME NULL COMMENT '完成或失败时间（UTC）'
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    COMMENT='Wiki维护任务队列表'
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS maintenance_page_state (
+                        page_path VARCHAR(512) PRIMARY KEY COMMENT 'Wiki目录下的页面相对路径',
+                        content_hash CHAR(64) NOT NULL COMMENT '当前页面内容的SHA-256哈希',
+                        last_structural_checked_at DATETIME NULL COMMENT '最近完成结构检查时间（UTC）',
+                        last_semantic_checked_at DATETIME NULL COMMENT '最近完成语义检查时间（UTC）',
+                        last_semantic_content_hash CHAR(64) NULL COMMENT '最近语义检查对应的内容SHA-256哈希',
+                        last_semantic_job_id BIGINT UNSIGNED NULL COMMENT '最近语义检查对应的维护任务ID'
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    COMMENT='Wiki页面巡检状态表'
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS maintenance_findings (
+                        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT COMMENT '巡检发现数字自增主键',
+                        job_id BIGINT UNSIGNED NOT NULL COMMENT '产生该发现的维护任务ID',
+                        finding_type VARCHAR(32) NOT NULL COMMENT '发现类型，如broken_link、orphan或contradiction',
+                        severity VARCHAR(16) NOT NULL COMMENT '严重级别：info、warning或error',
+                        affected_pages JSON NOT NULL COMMENT '受影响页面相对路径列表（JSON）',
+                        evidence JSON NOT NULL COMMENT '供人工核对的短证据列表（JSON）',
+                        recommendation TEXT NOT NULL COMMENT '建议处理方式',
+                        confidence DECIMAL(4,3) NULL COMMENT '语义发现的置信度（0至1）',
+                        review_status VARCHAR(16) NOT NULL COMMENT '人工复核状态：needs_review、confirmed或dismissed',
+                        created_at DATETIME NOT NULL COMMENT '发现写入时间（UTC）'
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    COMMENT='Wiki巡检发现表'
+                    """
+                )
                 self._ensure_ingest_progress_columns(cursor)
                 self._ensure_message_citations_column(cursor)
                 self._apply_schema_comments(cursor)
@@ -142,6 +201,13 @@ class MySQLStorage:
                 )
                 self._ensure_index(cursor, "ingest_jobs", "idx_ingest_jobs_created_at", "created_at DESC")
                 self._ensure_index(cursor, "publish_jobs", "idx_publish_jobs_schedule", "status, scheduled_at")
+                self._ensure_index(cursor, "maintenance_jobs", "idx_maintenance_jobs_status_created", "status, created_at")
+                self._ensure_index(cursor, "maintenance_jobs", "idx_maintenance_jobs_workflow_id", "workflow_id, id")
+                self._ensure_index(cursor, "maintenance_jobs", "idx_maintenance_jobs_kind_finished", "task_kind, finished_at")
+                self._ensure_index(cursor, "maintenance_jobs", "idx_maintenance_jobs_dependency", "depends_on_job_id")
+                self._ensure_index(cursor, "maintenance_page_state", "idx_maintenance_page_state_semantic_at", "last_semantic_checked_at")
+                self._ensure_index(cursor, "maintenance_page_state", "idx_maintenance_page_state_semantic_job", "last_semantic_job_id")
+                self._ensure_index(cursor, "maintenance_findings", "idx_maintenance_findings_job", "job_id")
 
     @contextmanager
     def connect(self) -> Iterator[Any]:
@@ -765,6 +831,233 @@ class MySQLStorage:
             last_successful_job=self._publish_job_from_row(successful_rows[0]) if successful_rows else None,
         )
 
+    def create_maintenance_job(
+        self,
+        *,
+        task_kind: MaintenanceTaskKind,
+        trigger: MaintenanceTrigger,
+        options: dict[str, Any],
+        workflow_id: Any | None,
+        depends_on_job_id: int | None,
+        now: datetime,
+    ) -> MaintenanceJobResponse:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO maintenance_jobs (
+                        task_kind, status, result_state, trigger_kind, workflow_id,
+                        depends_on_job_id, stage, progress_percent, request_options,
+                        result_summary, created_at, updated_at
+                    ) VALUES (%s, 'queued', 'unavailable', %s, %s, %s, 'queued', 0, %s, %s, %s, %s)
+                    """,
+                    (
+                        task_kind,
+                        trigger,
+                        str(workflow_id) if workflow_id is not None else None,
+                        depends_on_job_id,
+                        json.dumps(options, ensure_ascii=False),
+                        json.dumps({}, ensure_ascii=False),
+                        now,
+                        now,
+                    ),
+                )
+                job_id = int(cursor.lastrowid)
+        return self.get_maintenance_job(job_id) or self._raise_missing_maintenance_job(job_id)
+
+    def claim_due_maintenance_job(self, *, now: datetime) -> MaintenanceJobResponse | None:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE maintenance_jobs AS child
+                    INNER JOIN maintenance_jobs AS dependency ON dependency.id = child.depends_on_job_id
+                    SET child.status = 'failed', child.result_state = 'unavailable',
+                        child.stage = 'dependency_failed', child.error = 'dependency job failed',
+                        child.finished_at = %s, child.updated_at = %s
+                    WHERE child.status = 'queued' AND dependency.status = 'failed'
+                    """,
+                    (now, now),
+                )
+                cursor.execute(
+                    """
+                    SELECT job.*
+                    FROM maintenance_jobs AS job
+                    LEFT JOIN maintenance_jobs AS dependency ON dependency.id = job.depends_on_job_id
+                    WHERE job.status = 'queued'
+                      AND (job.depends_on_job_id IS NULL OR dependency.status = 'succeeded')
+                    ORDER BY job.created_at ASC, job.id ASC
+                    LIMIT 1 FOR UPDATE
+                    """
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                job_id = int(row["id"])
+                cursor.execute(
+                    """
+                    UPDATE maintenance_jobs
+                    SET status = 'running', stage = 'starting', progress_percent = 5,
+                        started_at = %s, updated_at = %s, error = NULL
+                    WHERE id = %s
+                    """,
+                    (now, now, job_id),
+                )
+        return self.get_maintenance_job(job_id)
+
+    def mark_maintenance_job_succeeded(
+        self,
+        *,
+        job_id: int,
+        result_state: MaintenanceResultState,
+        result_summary: dict[str, Any],
+        finished_at: datetime,
+    ) -> None:
+        self._execute_update(
+            """
+            UPDATE maintenance_jobs
+            SET status = 'succeeded', result_state = %s, stage = 'completed', progress_percent = 100,
+                result_summary = %s, error = NULL, finished_at = %s, updated_at = %s
+            WHERE id = %s
+            """,
+            (result_state, json.dumps(result_summary, ensure_ascii=False), finished_at, finished_at, job_id),
+        )
+
+    def update_maintenance_job_progress(
+        self, *, job_id: int, stage: str, progress_percent: int, updated_at: datetime
+    ) -> None:
+        self._execute_update(
+            """
+            UPDATE maintenance_jobs
+            SET stage = %s, progress_percent = %s, updated_at = %s
+            WHERE id = %s AND status = 'running'
+            """,
+            (stage, progress_percent, updated_at, job_id),
+        )
+
+    def mark_maintenance_job_failed(self, *, job_id: int, error: str, finished_at: datetime) -> None:
+        self._execute_update(
+            """
+            UPDATE maintenance_jobs
+            SET status = 'failed', result_state = 'unavailable', stage = 'failed',
+                error = %s, finished_at = %s, updated_at = %s
+            WHERE id = %s
+            """,
+            (error, finished_at, finished_at, job_id),
+        )
+
+    def recover_maintenance_jobs(self, *, now: datetime) -> None:
+        self._execute_update(
+            """
+            UPDATE maintenance_jobs
+            SET status = 'failed', result_state = 'unavailable', stage = 'failed',
+                error = 'maintenance worker restarted', finished_at = %s, updated_at = %s
+            WHERE status = 'running'
+            """,
+            (now, now),
+        )
+
+    def upsert_maintenance_page_states(self, *, page_hashes: dict[str, str], checked_at: datetime) -> None:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                for page_path, content_hash in page_hashes.items():
+                    cursor.execute(
+                        """
+                        INSERT INTO maintenance_page_state (page_path, content_hash, last_structural_checked_at)
+                        VALUES (%s, %s, %s)
+                        ON DUPLICATE KEY UPDATE content_hash = VALUES(content_hash),
+                            last_structural_checked_at = VALUES(last_structural_checked_at)
+                        """,
+                        (page_path, content_hash, checked_at),
+                    )
+
+    def get_maintenance_page_states(self) -> dict[str, dict[str, Any]]:
+        rows = self._fetch_all(
+            "SELECT page_path, content_hash, last_semantic_checked_at, last_semantic_content_hash FROM maintenance_page_state"
+        )
+        return {str(row["page_path"]): row for row in rows}
+
+    def mark_maintenance_pages_semantically_checked(
+        self, *, page_hashes: dict[str, str], job_id: int, checked_at: datetime
+    ) -> None:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                for page_path, content_hash in page_hashes.items():
+                    cursor.execute(
+                        """
+                        UPDATE maintenance_page_state
+                        SET last_semantic_checked_at = %s, last_semantic_content_hash = %s,
+                            last_semantic_job_id = %s
+                        WHERE page_path = %s
+                        """,
+                        (checked_at, content_hash, job_id, page_path),
+                    )
+
+    def replace_maintenance_findings(self, *, job_id: int, findings: list[dict[str, Any]], created_at: datetime) -> None:
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM maintenance_findings WHERE job_id = %s", (job_id,))
+                for finding in findings:
+                    cursor.execute(
+                        """
+                        INSERT INTO maintenance_findings (
+                            job_id, finding_type, severity, affected_pages, evidence,
+                            recommendation, confidence, review_status, created_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'needs_review', %s)
+                        """,
+                        (job_id, finding["finding_type"], finding["severity"], json.dumps(finding["affected_pages"], ensure_ascii=False), json.dumps(finding["evidence"], ensure_ascii=False), finding["recommendation"], finding.get("confidence"), created_at),
+                    )
+
+    def list_maintenance_findings(self, *, job_id: int) -> list[dict[str, Any]]:
+        rows = self._fetch_all(
+            """
+            SELECT id, finding_type, severity, affected_pages, evidence, recommendation,
+                   review_status
+            FROM maintenance_findings
+            WHERE job_id = %s
+            ORDER BY id ASC
+            """,
+            (job_id,),
+        )
+        return [
+            {
+                "finding_id": int(row["id"]),
+                "finding_type": str(row["finding_type"]),
+                "severity": str(row["severity"]),
+                "affected_pages": self._parse_json_field(row.get("affected_pages")),
+                "evidence": self._parse_json_list(row.get("evidence")),
+                "recommendation": str(row["recommendation"] or ""),
+                "review_status": str(row["review_status"]),
+            }
+            for row in rows
+        ]
+
+    def get_maintenance_job(self, job_id: int) -> MaintenanceJobResponse | None:
+        rows = self._fetch_all(self._maintenance_job_select("WHERE m.id = %s"), (job_id,))
+        return self._maintenance_job_from_row(rows[0]) if rows else None
+
+    def list_maintenance_jobs(
+        self,
+        *,
+        limit: int,
+        task_kind: MaintenanceTaskKind | None,
+        workflow_id: Any | None,
+    ) -> list[MaintenanceJobResponse]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if task_kind is not None:
+            clauses.append("m.task_kind = %s")
+            params.append(task_kind)
+        if workflow_id is not None:
+            clauses.append("m.workflow_id = %s")
+            params.append(str(workflow_id))
+        suffix = "WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self._fetch_all(
+            self._maintenance_job_select(f"{suffix} ORDER BY m.created_at DESC, m.id DESC LIMIT %s"),
+            tuple([*params, limit]),
+        )
+        return [self._maintenance_job_from_row(row) for row in rows]
+
     def get_publication(self, *, source_kind: str, source_id: str) -> PublicationResponse | None:
         rows = self._fetch_all(
             """
@@ -826,6 +1119,39 @@ class MySQLStorage:
         except Exception as exc:
             raise StorageError("Storage query failed.") from exc
         return list(rows)
+
+    @staticmethod
+    def _maintenance_job_select(suffix: str) -> str:
+        return "SELECT m.* FROM maintenance_jobs AS m " + suffix
+
+    @staticmethod
+    def _raise_missing_maintenance_job(job_id: int) -> MaintenanceJobResponse:
+        raise StorageError(f"Failed to reload maintenance job: {job_id}")
+
+    @classmethod
+    def _maintenance_job_from_row(cls, row: dict[str, Any]) -> MaintenanceJobResponse:
+        return MaintenanceJobResponse(
+            job_id=int(row["id"]),
+            task_kind=row["task_kind"],
+            status=row["status"],
+            result_state=row["result_state"],
+            trigger=row["trigger_kind"],
+            workflow_id=row.get("workflow_id"),
+            depends_on_job_id=(
+                int(row["depends_on_job_id"])
+                if row.get("depends_on_job_id") is not None
+                else None
+            ),
+            stage=row["stage"],
+            progress_percent=int(row["progress_percent"]),
+            options=cls._parse_json_object(row.get("request_options")),
+            result_summary=cls._parse_json_object(row.get("result_summary")),
+            error=row.get("error"),
+            created_at=row["created_at"],
+            started_at=row.get("started_at"),
+            updated_at=row["updated_at"],
+            finished_at=row.get("finished_at"),
+        )
 
     def _execute_update(self, query: str, params: tuple[Any, ...]) -> None:
         try:
@@ -921,6 +1247,9 @@ class MySQLStorage:
         expected_table_comments = {
             "chats": "聊天会话表",
             "chat_messages": "聊天消息表",
+            "maintenance_jobs": "Wiki维护任务队列表",
+            "maintenance_page_state": "Wiki页面巡检状态表",
+            "maintenance_findings": "Wiki巡检发现表",
         }
         expected_column_comments = {
             "chats": {
@@ -943,13 +1272,54 @@ class MySQLStorage:
                 "synthesis_path": "该助手消息保存成的Synthesis相对路径",
                 "synthesized_at": "保存为Synthesis的时间（UTC）",
             },
+            "maintenance_jobs": {
+                "id": "维护任务数字自增主键",
+                "task_kind": "维护任务类型：health、graph或lint",
+                "status": "任务状态：queued、running、succeeded或failed",
+                "result_state": "结果完整性：unavailable、partial或complete",
+                "trigger_kind": "触发方式：manual或workflow",
+                "workflow_id": "所属质量工作流UUID",
+                "depends_on_job_id": "前置依赖维护任务ID",
+                "stage": "当前执行阶段",
+                "progress_percent": "任务完成百分比（0至100）",
+                "request_options": "创建任务时的选项（JSON）",
+                "result_summary": "任务完成后的结构化结果摘要（JSON）",
+                "error": "安全截断后的失败错误摘要",
+                "created_at": "创建时间（UTC）",
+                "started_at": "开始执行时间（UTC）",
+                "updated_at": "最后更新时间（UTC）",
+                "finished_at": "完成或失败时间（UTC）",
+            },
+            "maintenance_page_state": {
+                "page_path": "Wiki目录下的页面相对路径",
+                "content_hash": "当前页面内容的SHA-256哈希",
+                "last_structural_checked_at": "最近完成结构检查时间（UTC）",
+                "last_semantic_checked_at": "最近完成语义检查时间（UTC）",
+                "last_semantic_content_hash": "最近语义检查对应的内容SHA-256哈希",
+                "last_semantic_job_id": "最近语义检查对应的维护任务ID",
+            },
+            "maintenance_findings": {
+                "id": "巡检发现数字自增主键",
+                "job_id": "产生该发现的维护任务ID",
+                "finding_type": "发现类型，如broken_link、orphan或contradiction",
+                "severity": "严重级别：info、warning或error",
+                "affected_pages": "受影响页面相对路径列表（JSON）",
+                "evidence": "供人工核对的短证据列表（JSON）",
+                "recommendation": "建议处理方式",
+                "confidence": "语义发现的置信度（0至1）",
+                "review_status": "人工复核状态：needs_review、confirmed或dismissed",
+                "created_at": "发现写入时间（UTC）",
+            },
         }
         cursor.execute(
             """
             SELECT TABLE_NAME, TABLE_COMMENT
             FROM information_schema.TABLES
             WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME IN ('chats', 'chat_messages')
+              AND TABLE_NAME IN (
+                  'chats', 'chat_messages', 'maintenance_jobs',
+                  'maintenance_page_state', 'maintenance_findings'
+              )
             """
         )
         actual_table_comments = {
@@ -960,16 +1330,25 @@ class MySQLStorage:
             SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, COLUMN_COMMENT
             FROM information_schema.COLUMNS
             WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME IN ('chats', 'chat_messages')
+              AND TABLE_NAME IN (
+                  'chats', 'chat_messages', 'maintenance_jobs',
+                  'maintenance_page_state', 'maintenance_findings'
+              )
             """
         )
         actual_column_comments: dict[str, dict[str, str]] = {
             "chats": {},
             "chat_messages": {},
+            "maintenance_jobs": {},
+            "maintenance_page_state": {},
+            "maintenance_findings": {},
         }
         actual_column_types: dict[str, dict[str, str]] = {
             "chats": {},
             "chat_messages": {},
+            "maintenance_jobs": {},
+            "maintenance_page_state": {},
+            "maintenance_findings": {},
         }
         for row in cursor.fetchall():
             actual_column_comments[row["TABLE_NAME"]][row["COLUMN_NAME"]] = row[
@@ -998,6 +1377,74 @@ class MySQLStorage:
                     MODIFY COLUMN updated_at DATETIME NOT NULL COMMENT '最后更新时间（UTC）',
                     MODIFY COLUMN last_message_at DATETIME NULL COMMENT '最后一条消息时间（UTC）',
                     COMMENT = '聊天会话表'
+                """
+            )
+        if (
+            actual_table_comments.get("maintenance_jobs")
+            != expected_table_comments["maintenance_jobs"]
+            or actual_column_comments["maintenance_jobs"]
+            != expected_column_comments["maintenance_jobs"]
+        ):
+            cursor.execute(
+                """
+                ALTER TABLE maintenance_jobs
+                    MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '维护任务数字自增主键',
+                    MODIFY COLUMN task_kind VARCHAR(16) NOT NULL COMMENT '维护任务类型：health、graph或lint',
+                    MODIFY COLUMN status VARCHAR(16) NOT NULL COMMENT '任务状态：queued、running、succeeded或failed',
+                    MODIFY COLUMN result_state VARCHAR(16) NOT NULL DEFAULT 'unavailable' COMMENT '结果完整性：unavailable、partial或complete',
+                    MODIFY COLUMN trigger_kind VARCHAR(16) NOT NULL COMMENT '触发方式：manual或workflow',
+                    MODIFY COLUMN workflow_id CHAR(36) NULL COMMENT '所属质量工作流UUID',
+                    MODIFY COLUMN depends_on_job_id BIGINT UNSIGNED NULL COMMENT '前置依赖维护任务ID',
+                    MODIFY COLUMN stage VARCHAR(32) NOT NULL DEFAULT 'queued' COMMENT '当前执行阶段',
+                    MODIFY COLUMN progress_percent TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '任务完成百分比（0至100）',
+                    MODIFY COLUMN request_options JSON NOT NULL COMMENT '创建任务时的选项（JSON）',
+                    MODIFY COLUMN result_summary JSON NOT NULL COMMENT '任务完成后的结构化结果摘要（JSON）',
+                    MODIFY COLUMN error TEXT NULL COMMENT '安全截断后的失败错误摘要',
+                    MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
+                    MODIFY COLUMN started_at DATETIME NULL COMMENT '开始执行时间（UTC）',
+                    MODIFY COLUMN updated_at DATETIME NOT NULL COMMENT '最后更新时间（UTC）',
+                    MODIFY COLUMN finished_at DATETIME NULL COMMENT '完成或失败时间（UTC）',
+                    COMMENT = 'Wiki维护任务队列表'
+                """
+            )
+        if (
+            actual_table_comments.get("maintenance_page_state")
+            != expected_table_comments["maintenance_page_state"]
+            or actual_column_comments["maintenance_page_state"]
+            != expected_column_comments["maintenance_page_state"]
+        ):
+            cursor.execute(
+                """
+                ALTER TABLE maintenance_page_state
+                    MODIFY COLUMN page_path VARCHAR(512) NOT NULL COMMENT 'Wiki目录下的页面相对路径',
+                    MODIFY COLUMN content_hash CHAR(64) NOT NULL COMMENT '当前页面内容的SHA-256哈希',
+                    MODIFY COLUMN last_structural_checked_at DATETIME NULL COMMENT '最近完成结构检查时间（UTC）',
+                    MODIFY COLUMN last_semantic_checked_at DATETIME NULL COMMENT '最近完成语义检查时间（UTC）',
+                    MODIFY COLUMN last_semantic_content_hash CHAR(64) NULL COMMENT '最近语义检查对应的内容SHA-256哈希',
+                    MODIFY COLUMN last_semantic_job_id BIGINT UNSIGNED NULL COMMENT '最近语义检查对应的维护任务ID',
+                    COMMENT = 'Wiki页面巡检状态表'
+                """
+            )
+        if (
+            actual_table_comments.get("maintenance_findings")
+            != expected_table_comments["maintenance_findings"]
+            or actual_column_comments["maintenance_findings"]
+            != expected_column_comments["maintenance_findings"]
+        ):
+            cursor.execute(
+                """
+                ALTER TABLE maintenance_findings
+                    MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '巡检发现数字自增主键',
+                    MODIFY COLUMN job_id BIGINT UNSIGNED NOT NULL COMMENT '产生该发现的维护任务ID',
+                    MODIFY COLUMN finding_type VARCHAR(32) NOT NULL COMMENT '发现类型，如broken_link、orphan或contradiction',
+                    MODIFY COLUMN severity VARCHAR(16) NOT NULL COMMENT '严重级别：info、warning或error',
+                    MODIFY COLUMN affected_pages JSON NOT NULL COMMENT '受影响页面相对路径列表（JSON）',
+                    MODIFY COLUMN evidence JSON NOT NULL COMMENT '供人工核对的短证据列表（JSON）',
+                    MODIFY COLUMN recommendation TEXT NOT NULL COMMENT '建议处理方式',
+                    MODIFY COLUMN confidence DECIMAL(4,3) NULL COMMENT '语义发现的置信度（0至1）',
+                    MODIFY COLUMN review_status VARCHAR(16) NOT NULL COMMENT '人工复核状态：needs_review、confirmed或dismissed',
+                    MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '发现写入时间（UTC）',
+                    COMMENT = 'Wiki巡检发现表'
                 """
             )
         if (
@@ -1053,6 +1500,19 @@ class MySQLStorage:
         return datetime.utcnow().replace(microsecond=0)
 
     @staticmethod
+    def _parse_json_object(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return {}
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
+
+    @staticmethod
     def _parse_json_field(value: Any) -> list[str]:
         if isinstance(value, list):
             return [str(item) for item in value]
@@ -1063,6 +1523,18 @@ class MySQLStorage:
                 return []
             if isinstance(parsed, list):
                 return [str(item) for item in parsed]
+        return []
+
+    @staticmethod
+    def _parse_json_list(value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return []
+            return parsed if isinstance(parsed, list) else []
         return []
 
     def _chat_from_row(self, row: dict[str, Any]) -> ChatResponse:

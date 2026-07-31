@@ -147,7 +147,13 @@ class MySQLIntegrationTests(unittest.TestCase):
         self.assertEqual(created_ids, [second_chat["id"], first_chat["id"]])
 
     def test_tables_and_columns_have_comments(self) -> None:
-        expected_column_counts = {"chats": 6, "chat_messages": 10}
+        expected_column_counts = {
+            "chats": 6,
+            "chat_messages": 10,
+            "maintenance_jobs": 16,
+            "maintenance_page_state": 6,
+            "maintenance_findings": 10,
+        }
         with self.storage.connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -155,7 +161,10 @@ class MySQLIntegrationTests(unittest.TestCase):
                     SELECT TABLE_NAME, TABLE_COMMENT
                     FROM information_schema.TABLES
                     WHERE TABLE_SCHEMA = %s
-                      AND TABLE_NAME IN ('chats', 'chat_messages')
+                      AND TABLE_NAME IN (
+                          'chats', 'chat_messages', 'maintenance_jobs',
+                          'maintenance_page_state', 'maintenance_findings'
+                      )
                     """,
                     (settings.mysql_database,),
                 )
@@ -165,13 +174,16 @@ class MySQLIntegrationTests(unittest.TestCase):
                     SELECT TABLE_NAME, COLUMN_COMMENT
                     FROM information_schema.COLUMNS
                     WHERE TABLE_SCHEMA = %s
-                      AND TABLE_NAME IN ('chats', 'chat_messages')
+                      AND TABLE_NAME IN (
+                          'chats', 'chat_messages', 'maintenance_jobs',
+                          'maintenance_page_state', 'maintenance_findings'
+                      )
                     """,
                     (settings.mysql_database,),
                 )
                 column_rows = cursor.fetchall()
 
-        self.assertEqual(len(table_rows), 2)
+        self.assertEqual(len(table_rows), len(expected_column_counts))
         self.assertTrue(all(row["TABLE_COMMENT"] for row in table_rows))
         for table_name, expected_count in expected_column_counts.items():
             comments = [

@@ -91,7 +91,7 @@ Ingest 响应在保留 `status` 的同时提供 `stage`、`progress_percent` 和
 
 失败任务保留失败前最后一个 `stage` 和 `progress_percent`。这些百分比是离散阶段值，不表示阶段内部完成度，也不包含 Quartz build/publish 进度。
 
-上传文件采用分块读取，默认最大为 50 MiB，可通过
+上传文件采用分块读取，默认最大为 10 MiB，可通过
 `WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES` 调整。服务端会校验声明的 MIME 类型；PDF、Office、EPUB、XLS、RTF、WAV 和 MP3 等格式还会检查文件签名或容器结构。校验失败的临时上传文件会被删除，不创建 Ingest 任务。
 
 `created_pages` 和 `updated_pages` 根据本次写入前目标 Wiki 文件是否存在区分；重新入库并覆盖已有 Entity 或 Concept 时会进入 `updated_pages`。
@@ -152,7 +152,7 @@ WIKI_BACKEND_MYSQL_PASSWORD=replace-with-a-strong-password
 WIKI_BACKEND_MYSQL_DATABASE=wiki_backend
 WIKI_BACKEND_DEFAULT_CHAT_TITLE=新对话
 WIKI_BACKEND_CHAT_HISTORY_LIMIT=6
-WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES=52428800
+WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES=10485760
 WIKI_BACKEND_INGEST_LLM_MAX_TOKENS=8192
 WIKI_BACKEND_LLM_FAST_PROVIDER=deepseek
 WIKI_BACKEND_LLM_FAST_MODEL=deepseek-v4-flash

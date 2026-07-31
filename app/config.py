@@ -43,7 +43,7 @@ class Settings(BaseSettings):
         validation_alias="WIKI_BACKEND_CHAT_HISTORY_LIMIT",
     )
     ingest_max_upload_bytes: int = Field(
-        default=50 * 1024 * 1024,
+        default=10 * 1024 * 1024,
         gt=0,
         validation_alias="WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES",
     )

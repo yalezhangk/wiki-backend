@@ -55,6 +55,12 @@ class StartupDependencyTests(unittest.TestCase):
 
         self.assertEqual(settings.ingest_max_upload_bytes, 12345)
 
+    def test_default_ingest_upload_limit_is_ten_mib(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            settings = Settings(_env_file=None)
+
+        self.assertEqual(settings.ingest_max_upload_bytes, 10 * 1024 * 1024)
+
     def test_ingest_llm_token_limit_uses_environment_value(self) -> None:
         with patch.dict(
             "os.environ",

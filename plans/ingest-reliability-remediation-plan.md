@@ -63,7 +63,7 @@ worker 使用进程内 `Queue[str]` 和 daemon thread。MySQL 只保存任务状
 
 ### P2：LLM 输入和输出均缺少大小控制
 
-上传大小上限为 50 MiB，但 PDF 转 Markdown 后的字符数没有限制；Prompt 还可能包含 index、overview 和最近五份 source。超长输入可能超模型上下文、显著增加延迟和费用。
+上传大小上限为 10 MiB，但 PDF 转 Markdown 后的字符数没有限制；Prompt 还可能包含 index、overview 和最近五份 source。超长输入可能超模型上下文、显著增加延迟和费用。
 
 输出端也没有限制 entity/concept 页面数量、每页篇幅、source page 篇幅或 overview 篇幅。
 

@@ -12,6 +12,7 @@ from app.schemas.synthesis import SynthesisResponse
 from app.services.chat_service import ChatService
 from app.services.publish_service import PublishService
 from app.storage.mysql import StorageError
+from app.time_utils import beijing_now
 
 LOGGER = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ class SynthesisService:
             raise SynthesisQuestionNotFoundError("previous user question not found")
 
         synthesis_title = self._normalize_title(title or question_message.content)
-        created_at = datetime.utcnow().replace(microsecond=0)
+        created_at = beijing_now()
 
         with self._lock:
             relative_path = self._allocate_relative_path(synthesis_title, created_at)

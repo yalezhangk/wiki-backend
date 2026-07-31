@@ -67,7 +67,7 @@ http://127.0.0.1:8081/docs
 ### 当前响应契约基线
 
 - `chats.id`、`chat_messages.chat_id`、`ingest_jobs.job_id`、`publish_jobs.job_id` 与发布状态中的 `job_id` 均为正整数 JSON number。此前 UUID 路径和 UUID 请求体不再兼容，会返回 `422`。
-- 所有 API 时间字段表示 UTC，精确到秒，当前序列化为不带 `Z` 或时区偏移的 ISO 8601 字符串，例如 `2026-07-22T10:01:08`。客户端不得按本地时区解释该字符串。
+- 数据库业务时间字段精确到秒，当前序列化为不带 `Z` 或时区偏移的 ISO 8601 字符串。部署本变更后新建或更新的记录按北京时间（`Asia/Shanghai`）写入，例如 `2026-07-22T18:01:08`；既有记录保留原始 UTC 数值，不做迁移。
 - `source_path` 相对于 `WIKI_AGENT_REPO_PATH` 指向的 agent 仓库根目录，例如 `raw/uploads/report.md`。
 - `relevant_pages`、`created_pages`、`updated_pages`、`synthesis_path` 和 Synthesis 响应中的 `path` 都是相对于 `llm-wiki-agent/wiki` 的路径，统一使用 `/` 分隔符。
 - `sources` 是本次回答可引用的 Wiki 根目录相对路径，按检索顺序稳定去重，统一使用 `/` 分隔符并保留 `.md` 后缀。`POST /api/query` 正文中的 `[n]` 对应 `sources[n - 1]`；聊天回答使用实际 Wiki 页面链接。`relevant_pages` 仍表示检索到的扩展阅读上下文。

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Callable, Protocol
 from uuid import UUID, uuid4
 
@@ -13,6 +13,7 @@ from app.schemas.maintenance import (
     MaintenanceTaskKind,
     MaintenanceTrigger,
 )
+from app.time_utils import beijing_now
 
 LOGGER = logging.getLogger(__name__)
 
@@ -95,7 +96,7 @@ class MaintenanceService:
         self._wake_event = threading.Event()
         self._worker: threading.Thread | None = None
         if start_worker:
-            self._storage.recover_maintenance_jobs(now=self._utc_now())
+            self._storage.recover_maintenance_jobs(now=self._beijing_now())
             self._worker = threading.Thread(
                 target=self._worker_loop,
                 name="maintenance-worker",
@@ -118,7 +119,7 @@ class MaintenanceService:
             options=self._default_options(task_kind, options),
             workflow_id=workflow_id,
             depends_on_job_id=depends_on_job_id,
-            now=self._utc_now(),
+            now=self._beijing_now(),
         )
         self._wake_event.set()
         return job
@@ -168,7 +169,7 @@ class MaintenanceService:
 
     def _worker_loop(self) -> None:
         while True:
-            job = self._storage.claim_due_maintenance_job(now=self._utc_now())
+            job = self._storage.claim_due_maintenance_job(now=self._beijing_now())
             if job is None:
                 self._wake_event.wait(timeout=1.0)
                 self._wake_event.clear()
@@ -185,7 +186,7 @@ class MaintenanceService:
                 job_id=job.job_id,
                 result_state=result.result_state,
                 result_summary=result.result_summary,
-                finished_at=self._utc_now(),
+                finished_at=self._beijing_now(),
             )
             LOGGER.info("Maintenance task completed job_id=%s task_kind=%s", job.job_id, job.task_kind)
         except Exception as exc:
@@ -193,7 +194,7 @@ class MaintenanceService:
             self._storage.mark_maintenance_job_failed(
                 job_id=job.job_id,
                 error=self._safe_error(exc),
-                finished_at=self._utc_now(),
+                finished_at=self._beijing_now(),
             )
 
     @staticmethod
@@ -211,5 +212,5 @@ class MaintenanceService:
         return (message or exc.__class__.__name__)[:1000]
 
     @staticmethod
-    def _utc_now() -> datetime:
-        return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+    def _beijing_now() -> datetime:
+        return beijing_now()

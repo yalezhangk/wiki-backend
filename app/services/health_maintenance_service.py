@@ -3,13 +3,14 @@ from __future__ import annotations
 import re
 import threading
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 from app.schemas.maintenance import MaintenanceJobResponse
 from app.services.maintenance_service import MaintenanceTaskResult
 from app.services.wiki_page_policy import iter_knowledge_pages
+from app.time_utils import beijing_now
 
 STUB_THRESHOLD_CHARS = 100
 
@@ -209,5 +210,5 @@ class HealthMaintenanceService:
             job_id=job_id,
             stage=stage,
             progress_percent=progress_percent,
-            updated_at=datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0),
+            updated_at=beijing_now(),
         )

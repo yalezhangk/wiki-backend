@@ -6,11 +6,12 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
 from app.schemas.publish import PublicationResponse, PublishJobResponse, PublishStatusResponse
+from app.time_utils import beijing_now
 
 LOGGER = logging.getLogger(__name__)
 RELEASE_RETENTION_COUNT = 3
@@ -89,12 +90,12 @@ class PublishService:
         self._wake_event = threading.Event()
         self._worker: threading.Thread | None = None
         if start_worker:
-            self._storage.recover_publish_jobs(now=self._utc_now())
+            self._storage.recover_publish_jobs(now=self._beijing_now())
             self._worker = threading.Thread(target=self._worker_loop, name="publish-worker", daemon=True)
             self._worker.start()
 
     def queue_change(self, *, source_kind: str, source_id: str) -> PublishJobResponse:
-        now = self._utc_now()
+        now = self._beijing_now()
         job = self._storage.queue_publish_change(
             source_kind=source_kind,
             source_id=source_id,
@@ -106,7 +107,7 @@ class PublishService:
         return job
 
     def request_manual_publish(self) -> PublishJobResponse:
-        job = self._storage.request_manual_publish(now=self._utc_now())
+        job = self._storage.request_manual_publish(now=self._beijing_now())
         self._wake_event.set()
         return job
 
@@ -127,7 +128,7 @@ class PublishService:
 
     def _worker_loop(self) -> None:
         while True:
-            job = self._storage.claim_due_publish_job(now=self._utc_now())
+            job = self._storage.claim_due_publish_job(now=self._beijing_now())
             if job is None:
                 self._wake_event.wait(timeout=1.0)
                 self._wake_event.clear()
@@ -147,7 +148,7 @@ class PublishService:
             self._storage.mark_publish_job_succeeded(
                 job_id=job.job_id,
                 release_id=str(job.job_id),
-                finished_at=self._utc_now(),
+                finished_at=self._beijing_now(),
             )
             LOGGER.info("Quartz publish completed job_id=%s", job.job_id)
         except Exception as exc:
@@ -155,7 +156,7 @@ class PublishService:
             self._storage.mark_publish_job_failed(
                 job_id=job.job_id,
                 error=self._safe_error(exc),
-                finished_at=self._utc_now(),
+                finished_at=self._beijing_now(),
             )
         finally:
             if snapshot_dir is not None:
@@ -281,5 +282,5 @@ class PublishService:
         return (message or exc.__class__.__name__)[:1000]
 
     @staticmethod
-    def _utc_now() -> datetime:
-        return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+    def _beijing_now() -> datetime:
+        return beijing_now()

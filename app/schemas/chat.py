@@ -37,9 +37,9 @@ class ChatResponse(BaseModel):
     id: int = Field(gt=0, description="聊天会话数字 ID。")
     title: str = Field(description="聊天会话标题。")
     status: str = Field(description="会话状态。当前实现通常为 active。")
-    created_at: datetime = Field(description="会话创建时间，UTC、秒精度。")
-    updated_at: datetime = Field(description="会话最近更新时间，UTC、秒精度。")
-    last_message_at: datetime | None = Field(default=None, description="最近一条消息的创建时间，UTC、秒精度。")
+    created_at: datetime = Field(description="会话创建时间，北京时间、秒精度。")
+    updated_at: datetime = Field(description="会话最近更新时间，北京时间、秒精度。")
+    last_message_at: datetime | None = Field(default=None, description="最近一条消息的创建时间，北京时间、秒精度。")
     last_message_preview: str | None = Field(
         default=None,
         description="最近一条消息的摘要预览，便于会话列表展示。",
@@ -74,14 +74,14 @@ class ChatMessageResponse(BaseModel):
         default_factory=list,
         description="助手回答的结构化 Wiki 引用；用户消息和旧历史消息通常为空列表。",
     )
-    created_at: datetime = Field(description="消息创建时间，UTC、秒精度。")
+    created_at: datetime = Field(description="消息创建时间，北京时间、秒精度。")
     synthesis_path: str | None = Field(
         default=None,
         description="该助手消息保存成 Synthesis 后的 Wiki 相对路径。",
     )
     synthesized_at: datetime | None = Field(
         default=None,
-        description="该助手消息保存为 Synthesis 的时间，UTC、秒精度。",
+        description="该助手消息保存为 Synthesis 的时间，北京时间、秒精度。",
     )
 
 

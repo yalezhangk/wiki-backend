@@ -10,6 +10,7 @@ from app.schemas.chat import ChatMessageResponse, ChatResponse
 from app.schemas.ingest import IngestJobResponse, IngestValidation
 from app.schemas.query import CitationResponse
 from app.schemas.publish import PublicationResponse, PublishJobResponse, PublishStatusResponse
+from app.time_utils import beijing_now
 from app.schemas.maintenance import (
     MaintenanceJobResponse,
     MaintenanceResultState,
@@ -54,9 +55,9 @@ class MySQLStorage:
                         id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT COMMENT '会话数字自增主键',
                         title VARCHAR(200) NOT NULL COMMENT '会话标题',
                         status VARCHAR(32) NOT NULL DEFAULT 'active' COMMENT '会话状态',
-                        created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
-                        updated_at DATETIME NOT NULL COMMENT '最后更新时间（UTC）',
-                        last_message_at DATETIME NULL COMMENT '最后一条消息时间（UTC）'
+                        created_at DATETIME NOT NULL COMMENT '创建时间（北京时间）',
+                        updated_at DATETIME NOT NULL COMMENT '最后更新时间（北京时间）',
+                        last_message_at DATETIME NULL COMMENT '最后一条消息时间（北京时间）'
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     COMMENT='聊天会话表'
                     """
@@ -71,9 +72,9 @@ class MySQLStorage:
                         sources JSON NOT NULL COMMENT '回答引用来源列表（JSON）',
                         relevant_pages JSON NOT NULL COMMENT '查询命中的Wiki页面列表（JSON）',
                         citations JSON NOT NULL COMMENT '结构化Wiki引用列表（JSON）',
-                        created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
+                        created_at DATETIME NOT NULL COMMENT '创建时间（北京时间）',
                         synthesis_path VARCHAR(500) NULL COMMENT '该助手消息保存成的Synthesis相对路径',
-                        synthesized_at DATETIME NULL COMMENT '保存为Synthesis的时间（UTC）',
+                        synthesized_at DATETIME NULL COMMENT '保存为Synthesis的时间（北京时间）',
                         CONSTRAINT fk_chat_messages_chat_id
                             FOREIGN KEY (chat_id) REFERENCES chats(id)
                             ON DELETE CASCADE
@@ -150,10 +151,10 @@ class MySQLStorage:
                         request_options JSON NOT NULL COMMENT '创建任务时的选项（JSON）',
                         result_summary JSON NOT NULL COMMENT '任务完成后的结构化结果摘要（JSON）',
                         error TEXT NULL COMMENT '安全截断后的失败错误摘要',
-                        created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
-                        started_at DATETIME NULL COMMENT '开始执行时间（UTC）',
-                        updated_at DATETIME NOT NULL COMMENT '最后更新时间（UTC）',
-                        finished_at DATETIME NULL COMMENT '完成或失败时间（UTC）'
+                        created_at DATETIME NOT NULL COMMENT '创建时间（北京时间）',
+                        started_at DATETIME NULL COMMENT '开始执行时间（北京时间）',
+                        updated_at DATETIME NOT NULL COMMENT '最后更新时间（北京时间）',
+                        finished_at DATETIME NULL COMMENT '完成或失败时间（北京时间）'
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     COMMENT='Wiki维护任务队列表'
                     """
@@ -163,8 +164,8 @@ class MySQLStorage:
                     CREATE TABLE IF NOT EXISTS maintenance_page_state (
                         page_path VARCHAR(512) PRIMARY KEY COMMENT 'Wiki目录下的页面相对路径',
                         content_hash CHAR(64) NOT NULL COMMENT '当前页面内容的SHA-256哈希',
-                        last_structural_checked_at DATETIME NULL COMMENT '最近完成结构检查时间（UTC）',
-                        last_semantic_checked_at DATETIME NULL COMMENT '最近完成语义检查时间（UTC）',
+                        last_structural_checked_at DATETIME NULL COMMENT '最近完成结构检查时间（北京时间）',
+                        last_semantic_checked_at DATETIME NULL COMMENT '最近完成语义检查时间（北京时间）',
                         last_semantic_content_hash CHAR(64) NULL COMMENT '最近语义检查对应的内容SHA-256哈希',
                         last_semantic_job_id BIGINT UNSIGNED NULL COMMENT '最近语义检查对应的维护任务ID'
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -183,7 +184,7 @@ class MySQLStorage:
                         recommendation TEXT NOT NULL COMMENT '建议处理方式',
                         confidence DECIMAL(4,3) NULL COMMENT '语义发现的置信度（0至1）',
                         review_status VARCHAR(16) NOT NULL COMMENT '人工复核状态：needs_review、confirmed或dismissed',
-                        created_at DATETIME NOT NULL COMMENT '发现写入时间（UTC）'
+                        created_at DATETIME NOT NULL COMMENT '发现写入时间（北京时间）'
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     COMMENT='Wiki巡检发现表'
                     """
@@ -259,7 +260,7 @@ class MySQLStorage:
         return [self._chat_from_row(row) for row in rows]
 
     def create_chat(self, title: str) -> ChatResponse:
-        now = self._utc_now()
+        now = self._beijing_now()
         with self.connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -297,7 +298,7 @@ class MySQLStorage:
         return self._chat_from_row(rows[0])
 
     def rename_chat(self, chat_id: int, title: str) -> ChatResponse:
-        updated_at = self._utc_now()
+        updated_at = self._beijing_now()
         with self.connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -388,7 +389,7 @@ class MySQLStorage:
         relevant_pages: list[str] | None = None,
         citations: list[CitationResponse] | None = None,
     ) -> ChatMessageResponse:
-        created_at = self._utc_now()
+        created_at = self._beijing_now()
         serialized_sources = json.dumps(sources or [], ensure_ascii=False)
         serialized_relevant_pages = json.dumps(relevant_pages or [], ensure_ascii=False)
         serialized_citations = json.dumps(
@@ -1256,9 +1257,9 @@ class MySQLStorage:
                 "id": "会话数字自增主键",
                 "title": "会话标题",
                 "status": "会话状态",
-                "created_at": "创建时间（UTC）",
-                "updated_at": "最后更新时间（UTC）",
-                "last_message_at": "最后一条消息时间（UTC）",
+                "created_at": "创建时间（北京时间）",
+                "updated_at": "最后更新时间（北京时间）",
+                "last_message_at": "最后一条消息时间（北京时间）",
             },
             "chat_messages": {
                 "id": "消息自增主键",
@@ -1268,9 +1269,9 @@ class MySQLStorage:
                 "sources": "回答引用来源列表（JSON）",
                 "relevant_pages": "查询命中的Wiki页面列表（JSON）",
                 "citations": "结构化Wiki引用列表（JSON）",
-                "created_at": "创建时间（UTC）",
+                "created_at": "创建时间（北京时间）",
                 "synthesis_path": "该助手消息保存成的Synthesis相对路径",
-                "synthesized_at": "保存为Synthesis的时间（UTC）",
+                "synthesized_at": "保存为Synthesis的时间（北京时间）",
             },
             "maintenance_jobs": {
                 "id": "维护任务数字自增主键",
@@ -1285,16 +1286,16 @@ class MySQLStorage:
                 "request_options": "创建任务时的选项（JSON）",
                 "result_summary": "任务完成后的结构化结果摘要（JSON）",
                 "error": "安全截断后的失败错误摘要",
-                "created_at": "创建时间（UTC）",
-                "started_at": "开始执行时间（UTC）",
-                "updated_at": "最后更新时间（UTC）",
-                "finished_at": "完成或失败时间（UTC）",
+                "created_at": "创建时间（北京时间）",
+                "started_at": "开始执行时间（北京时间）",
+                "updated_at": "最后更新时间（北京时间）",
+                "finished_at": "完成或失败时间（北京时间）",
             },
             "maintenance_page_state": {
                 "page_path": "Wiki目录下的页面相对路径",
                 "content_hash": "当前页面内容的SHA-256哈希",
-                "last_structural_checked_at": "最近完成结构检查时间（UTC）",
-                "last_semantic_checked_at": "最近完成语义检查时间（UTC）",
+                "last_structural_checked_at": "最近完成结构检查时间（北京时间）",
+                "last_semantic_checked_at": "最近完成语义检查时间（北京时间）",
                 "last_semantic_content_hash": "最近语义检查对应的内容SHA-256哈希",
                 "last_semantic_job_id": "最近语义检查对应的维护任务ID",
             },
@@ -1308,7 +1309,7 @@ class MySQLStorage:
                 "recommendation": "建议处理方式",
                 "confidence": "语义发现的置信度（0至1）",
                 "review_status": "人工复核状态：needs_review、confirmed或dismissed",
-                "created_at": "发现写入时间（UTC）",
+                "created_at": "发现写入时间（北京时间）",
             },
         }
         cursor.execute(
@@ -1373,9 +1374,9 @@ class MySQLStorage:
                     MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '会话数字自增主键',
                     MODIFY COLUMN title VARCHAR(200) NOT NULL COMMENT '会话标题',
                     MODIFY COLUMN status VARCHAR(32) NOT NULL DEFAULT 'active' COMMENT '会话状态',
-                    MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
-                    MODIFY COLUMN updated_at DATETIME NOT NULL COMMENT '最后更新时间（UTC）',
-                    MODIFY COLUMN last_message_at DATETIME NULL COMMENT '最后一条消息时间（UTC）',
+                    MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '创建时间（北京时间）',
+                    MODIFY COLUMN updated_at DATETIME NOT NULL COMMENT '最后更新时间（北京时间）',
+                    MODIFY COLUMN last_message_at DATETIME NULL COMMENT '最后一条消息时间（北京时间）',
                     COMMENT = '聊天会话表'
                 """
             )
@@ -1400,10 +1401,10 @@ class MySQLStorage:
                     MODIFY COLUMN request_options JSON NOT NULL COMMENT '创建任务时的选项（JSON）',
                     MODIFY COLUMN result_summary JSON NOT NULL COMMENT '任务完成后的结构化结果摘要（JSON）',
                     MODIFY COLUMN error TEXT NULL COMMENT '安全截断后的失败错误摘要',
-                    MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
-                    MODIFY COLUMN started_at DATETIME NULL COMMENT '开始执行时间（UTC）',
-                    MODIFY COLUMN updated_at DATETIME NOT NULL COMMENT '最后更新时间（UTC）',
-                    MODIFY COLUMN finished_at DATETIME NULL COMMENT '完成或失败时间（UTC）',
+                    MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '创建时间（北京时间）',
+                    MODIFY COLUMN started_at DATETIME NULL COMMENT '开始执行时间（北京时间）',
+                    MODIFY COLUMN updated_at DATETIME NOT NULL COMMENT '最后更新时间（北京时间）',
+                    MODIFY COLUMN finished_at DATETIME NULL COMMENT '完成或失败时间（北京时间）',
                     COMMENT = 'Wiki维护任务队列表'
                 """
             )
@@ -1418,8 +1419,8 @@ class MySQLStorage:
                 ALTER TABLE maintenance_page_state
                     MODIFY COLUMN page_path VARCHAR(512) NOT NULL COMMENT 'Wiki目录下的页面相对路径',
                     MODIFY COLUMN content_hash CHAR(64) NOT NULL COMMENT '当前页面内容的SHA-256哈希',
-                    MODIFY COLUMN last_structural_checked_at DATETIME NULL COMMENT '最近完成结构检查时间（UTC）',
-                    MODIFY COLUMN last_semantic_checked_at DATETIME NULL COMMENT '最近完成语义检查时间（UTC）',
+                    MODIFY COLUMN last_structural_checked_at DATETIME NULL COMMENT '最近完成结构检查时间（北京时间）',
+                    MODIFY COLUMN last_semantic_checked_at DATETIME NULL COMMENT '最近完成语义检查时间（北京时间）',
                     MODIFY COLUMN last_semantic_content_hash CHAR(64) NULL COMMENT '最近语义检查对应的内容SHA-256哈希',
                     MODIFY COLUMN last_semantic_job_id BIGINT UNSIGNED NULL COMMENT '最近语义检查对应的维护任务ID',
                     COMMENT = 'Wiki页面巡检状态表'
@@ -1443,7 +1444,7 @@ class MySQLStorage:
                     MODIFY COLUMN recommendation TEXT NOT NULL COMMENT '建议处理方式',
                     MODIFY COLUMN confidence DECIMAL(4,3) NULL COMMENT '语义发现的置信度（0至1）',
                     MODIFY COLUMN review_status VARCHAR(16) NOT NULL COMMENT '人工复核状态：needs_review、confirmed或dismissed',
-                    MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '发现写入时间（UTC）',
+                    MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '发现写入时间（北京时间）',
                     COMMENT = 'Wiki巡检发现表'
                 """
             )
@@ -1469,7 +1470,7 @@ class MySQLStorage:
                     """
                     ALTER TABLE chat_messages
                         ADD COLUMN synthesized_at DATETIME NULL
-                            COMMENT '保存为Synthesis的时间（UTC）'
+                            COMMENT '保存为Synthesis的时间（北京时间）'
                     """
                 )
             cursor.execute(
@@ -1482,9 +1483,9 @@ class MySQLStorage:
                     MODIFY COLUMN sources JSON NOT NULL COMMENT '回答引用来源列表（JSON）',
                     MODIFY COLUMN relevant_pages JSON NOT NULL COMMENT '查询命中的Wiki页面列表（JSON）',
                     MODIFY COLUMN citations JSON NOT NULL COMMENT '结构化Wiki引用列表（JSON）',
-                    MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '创建时间（UTC）',
+                    MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '创建时间（北京时间）',
                     MODIFY COLUMN synthesis_path VARCHAR(500) NULL COMMENT '该助手消息保存成的Synthesis相对路径',
-                    MODIFY COLUMN synthesized_at DATETIME NULL COMMENT '保存为Synthesis的时间（UTC）',
+                    MODIFY COLUMN synthesized_at DATETIME NULL COMMENT '保存为Synthesis的时间（北京时间）',
                     COMMENT = '聊天消息表'
                 """
             )
@@ -1496,8 +1497,8 @@ class MySQLStorage:
             cursor.execute(f"CREATE INDEX {index_name} ON {table_name}({columns_sql})")
 
     @staticmethod
-    def _utc_now() -> datetime:
-        return datetime.utcnow().replace(microsecond=0)
+    def _beijing_now() -> datetime:
+        return beijing_now()
 
     @staticmethod
     def _parse_json_object(value: Any) -> dict[str, Any]:

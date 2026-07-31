@@ -5,7 +5,7 @@ import json
 import re
 import statistics
 import threading
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -14,6 +14,7 @@ from app.schemas.maintenance import MaintenanceJobResponse
 from app.services.graph_html_renderer import render_graph_html
 from app.services.maintenance_service import MaintenanceTaskResult
 from app.services.wiki_page_policy import iter_knowledge_pages
+from app.time_utils import beijing_now
 
 _TYPE_COLORS = {
     "source": "#4CAF50",
@@ -373,4 +374,4 @@ class GraphMaintenanceService:
         return path.read_text(encoding="utf-8") if path.is_file() else ""
 
     def _progress(self, job_id: int, stage: str, percent: int) -> None:
-        self._storage.update_maintenance_job_progress(job_id=job_id, stage=stage, progress_percent=percent, updated_at=datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0))
+        self._storage.update_maintenance_job_progress(job_id=job_id, stage=stage, progress_percent=percent, updated_at=beijing_now())

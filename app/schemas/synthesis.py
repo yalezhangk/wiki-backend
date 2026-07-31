@@ -26,7 +26,7 @@ class SynthesisResponse(BaseModel):
     question_message_id: int = Field(description="该助手回答对应的用户问题消息 ID。")
     title: str = Field(description="Synthesis 标题。")
     path: str = Field(description="Synthesis Markdown 的 Wiki 相对路径。")
-    created_at: datetime = Field(description="保存时间，UTC、秒精度。")
+    created_at: datetime = Field(description="保存时间，北京时间、秒精度。")
     publication: PublicationResponse | None = Field(
         default=None,
         description="站点发布状态。",

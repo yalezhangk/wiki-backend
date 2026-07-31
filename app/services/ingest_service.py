@@ -21,6 +21,7 @@ from app.prompts import load_prompt, render_prompt
 from app.schemas.ingest import IngestJobResponse, IngestLLMResult, IngestValidation
 from app.services.publish_service import PublishService
 from app.services.wiki_page_policy import iter_knowledge_pages
+from app.time_utils import beijing_now
 
 LOGGER = logging.getLogger(__name__)
 
@@ -244,7 +245,7 @@ class IngestService:
         self._upload_dir.mkdir(parents=True, exist_ok=True)
         await self._save_upload(file=file, target_path=target_path, suffix=suffix)
 
-        created_at = self._utc_now()
+        created_at = self._beijing_now()
         job = self._storage.create_ingest_job(
             status="queued",
             original_filename=original_filename,
@@ -277,7 +278,7 @@ class IngestService:
 
     def _run_job(self, job_id: int) -> None:
         job = self.get_job(job_id)
-        started_at = self._utc_now()
+        started_at = self._beijing_now()
         self._storage.mark_ingest_job_running(job_id, started_at)
         try:
             result = self._ingest_source(self._agent_root / job.source_path, job_id=job_id)
@@ -287,7 +288,7 @@ class IngestService:
                 updated_pages=result["updated_pages"],
                 contradictions=result["contradictions"],
                 validation=result["validation"],
-                finished_at=self._utc_now(),
+                finished_at=self._beijing_now(),
             )
             if self._publish_service is not None:
                 try:
@@ -299,7 +300,7 @@ class IngestService:
             self._storage.mark_ingest_job_failed(
                 job_id=job_id,
                 error=str(exc),
-                finished_at=self._utc_now(),
+                finished_at=self._beijing_now(),
             )
 
     def _ingest_source(self, source_path: Path, *, job_id: int) -> dict[str, Any]:
@@ -369,7 +370,7 @@ class IngestService:
             job_id=job_id,
             stage=stage,
             progress_percent=progress_percent,
-            updated_at=self._utc_now(),
+            updated_at=self._beijing_now(),
         )
 
     def _parse_llm_result_with_repair(
@@ -741,5 +742,5 @@ class IngestService:
         temp_path.replace(path)
 
     @staticmethod
-    def _utc_now() -> datetime:
-        return datetime.utcnow().replace(microsecond=0)
+    def _beijing_now() -> datetime:
+        return beijing_now()

@@ -64,10 +64,10 @@ class IngestJobResponse(BaseModel):
     contradictions: list[str] = Field(default_factory=list, description="入库结果报告的矛盾摘要。")
     validation: IngestValidation = Field(default_factory=IngestValidation, description="入库后的校验摘要。")
     error: str | None = Field(default=None, description="失败原因；非失败状态为 null。")
-    created_at: datetime = Field(description="任务创建时间，UTC、秒精度。")
-    started_at: datetime | None = Field(default=None, description="任务开始时间，UTC、秒精度。")
-    updated_at: datetime = Field(description="任务状态或阶段最近更新时间，UTC、秒精度。")
-    finished_at: datetime | None = Field(default=None, description="任务结束时间，UTC、秒精度。")
+    created_at: datetime = Field(description="任务创建时间，北京时间、秒精度。")
+    started_at: datetime | None = Field(default=None, description="任务开始时间，北京时间、秒精度。")
+    updated_at: datetime = Field(description="任务状态或阶段最近更新时间，北京时间、秒精度。")
+    finished_at: datetime | None = Field(default=None, description="任务结束时间，北京时间、秒精度。")
     publication: PublicationResponse | None = Field(
         default=None,
         description="站点发布状态；仅在知识写入成功后存在。",

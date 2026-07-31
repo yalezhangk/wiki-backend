@@ -102,10 +102,10 @@ class MaintenanceJobResponse(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict, description="合并默认值后的实际执行选项。")
     result_summary: dict[str, Any] = Field(default_factory=dict, description="任务完成后的结构化摘要；运行中或失败时可能为空。Lint 会以 SHA-256 和字符数记录语义报告审计元数据，不返回模型原文。")
     error: str | None = Field(default=None, description="失败原因的安全截断文本；成功时为 null。")
-    created_at: datetime = Field(description="任务创建时间（UTC）。")
-    started_at: datetime | None = Field(default=None, description="任务开始执行时间（UTC）；尚未执行时为 null。")
-    updated_at: datetime = Field(description="状态或进度最后更新时间（UTC）。")
-    finished_at: datetime | None = Field(default=None, description="任务终态时间（UTC）；未完成时为 null。")
+    created_at: datetime = Field(description="任务创建时间（北京时间）。")
+    started_at: datetime | None = Field(default=None, description="任务开始执行时间（北京时间）；尚未执行时为 null。")
+    updated_at: datetime = Field(description="状态或进度最后更新时间（北京时间）。")
+    finished_at: datetime | None = Field(default=None, description="任务终态时间（北京时间）；未完成时为 null。")
 
 
 class MaintenanceWorkflowResponse(BaseModel):

@@ -6,7 +6,7 @@ import logging
 import re
 import statistics
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
@@ -17,6 +17,7 @@ from app.llm_config import call_llm_main
 from app.schemas.maintenance import MaintenanceJobResponse
 from app.services.maintenance_service import MaintenanceTaskResult
 from app.services.wiki_page_policy import iter_knowledge_pages
+from app.time_utils import beijing_now
 
 _CONFIDENCE_LABELS = {"high": 0.9, "medium": 0.6, "low": 0.3}
 LOGGER = logging.getLogger(__name__)
@@ -497,4 +498,4 @@ Be specific — name the exact pages and claims involved.
 
     def _progress(self, job_id: int, stage: str, percent: int) -> None: self._storage.update_maintenance_job_progress(job_id=job_id, stage=stage, progress_percent=percent, updated_at=self._now())
     @staticmethod
-    def _now() -> datetime: return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+    def _now() -> datetime: return beijing_now()

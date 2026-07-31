@@ -105,7 +105,8 @@ def get_maintenance_job(
         "一次创建固定的 `health → graph → lint` 依赖工作流，并返回三个已入队任务。"
         "Graph 仅在 Health 成功后运行，Lint 仅在 Graph 成功后运行；前置任务失败时，后续任务不会执行。\n\n"
         "请求中的 `lint_options` 与单独创建 lint 任务时的 `options` 规则一致。"
-        "工作流默认不启用 graph LLM 推断；Lint 默认启用语义分析，可能调用 LLM。"
+        "工作流中的各任务使用与单独创建任务相同的默认选项：Graph 默认启用 LLM 关系推断，"
+        "Lint 默认启用语义分析，二者均可能调用 LLM。"
     ),
     responses={
         422: {"description": "lint_options 校验失败。"},

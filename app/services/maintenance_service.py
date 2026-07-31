@@ -134,7 +134,7 @@ class MaintenanceService:
         )
         graph = self.create_job(
             task_kind="graph",
-            options={"infer_relations": False, "save_report": True},
+            options={},
             trigger="workflow",
             workflow_id=workflow_id,
             depends_on_job_id=health.job_id,

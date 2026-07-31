@@ -128,10 +128,12 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertEqual([job.task_kind for job in jobs], ["health", "graph", "lint"])
         self.assertEqual(jobs[1].depends_on_job_id, jobs[0].job_id)
         self.assertEqual(jobs[2].depends_on_job_id, jobs[1].job_id)
-        self.assertTrue(jobs[0].options["save_report"])
-        self.assertFalse(jobs[1].options["infer_relations"])
-        self.assertTrue(jobs[1].options["save_report"])
-        self.assertEqual(jobs[2].options["semantic_mode"], "delta")
+        self.assertEqual(jobs[0].options, {"save_report": True})
+        self.assertEqual(jobs[1].options, {"infer_relations": True, "save_report": True})
+        self.assertEqual(
+            jobs[2].options,
+            {"semantic_analysis": True, "semantic_mode": "delta", "selected_page_paths": []},
+        )
         self.assertEqual(jobs[2].workflow_id, workflow_id)
 
     def test_direct_graph_job_enables_relation_inference_by_default(self) -> None:

@@ -32,10 +32,18 @@ class FakeIngestService:
             )
         ]
 
-    async def create_job(self, *, file: UploadFile, auto_convert: bool = True) -> IngestJobResponse:
+    async def create_job(
+        self,
+        *,
+        file: UploadFile,
+        auto_convert: bool = True,
+        trigger: str = "manual",
+    ) -> IngestJobResponse:
         if self.error is not None:
             raise self.error
-        return self.jobs[0].model_copy(update={"original_filename": file.filename})
+        return self.jobs[0].model_copy(
+            update={"original_filename": file.filename, "trigger": trigger}
+        )
 
     def get_job(self, job_id: int) -> IngestJobResponse:
         if self.error is not None:
@@ -70,6 +78,17 @@ class IngestApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["job_id"], 1)
         self.assertEqual(response.json()["status"], "queued")
+        self.assertEqual(response.json()["trigger"], "manual")
+
+    def test_create_scheduled_ingest_job_sets_trigger(self) -> None:
+        response = self.client.post(
+            "/api/ingest/jobs",
+            data={"trigger": "scheduled"},
+            files={"file": ("report.md", b"# Report", "text/markdown")},
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["trigger"], "scheduled")
 
     def test_create_ingest_job_maps_validation_error(self) -> None:
         self.service.error = IngestValidationError("unsupported file extension: .exe")
@@ -104,6 +123,7 @@ class IngestApiTests(unittest.TestCase):
                 "stage": "uploaded",
                 "progress_percent": 0,
                 "original_filename": "report.md",
+                "trigger": "manual",
                 "source_path": "raw/uploads/report.md",
                 "created_pages": [],
                 "updated_pages": [],

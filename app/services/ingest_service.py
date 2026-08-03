@@ -5,6 +5,7 @@ import logging
 import re
 import threading
 import time
+import uuid
 import zipfile
 from datetime import date, datetime
 from pathlib import Path
@@ -18,7 +19,7 @@ from pydantic import ValidationError
 from app.config import settings
 from app.llm_config import LLMConfigError, LLMResponseTruncatedError, call_llm_main
 from app.prompts import load_prompt, render_prompt
-from app.schemas.ingest import IngestJobResponse, IngestLLMResult, IngestValidation
+from app.schemas.ingest import IngestJobResponse, IngestLLMResult, IngestTrigger, IngestValidation
 from app.services.publish_service import PublishService
 from app.services.wiki_page_policy import iter_knowledge_pages
 from app.time_utils import beijing_now
@@ -153,6 +154,7 @@ class IngestStorage(Protocol):
         original_filename: str,
         stored_filename: str,
         source_path: str,
+        trigger: IngestTrigger,
         created_at: datetime,
     ) -> IngestJobResponse:
         ...
@@ -223,7 +225,13 @@ class IngestService:
             self._worker = threading.Thread(target=self._worker_loop, name="ingest-worker", daemon=True)
             self._worker.start()
 
-    async def create_job(self, *, file: UploadFile, auto_convert: bool = True) -> IngestJobResponse:
+    async def create_job(
+        self,
+        *,
+        file: UploadFile,
+        auto_convert: bool = True,
+        trigger: IngestTrigger = "manual",
+    ) -> IngestJobResponse:
         original_filename = Path(file.filename or "").name
         if not original_filename:
             raise IngestValidationError("filename cannot be empty")
@@ -235,6 +243,8 @@ class IngestService:
             raise IngestValidationError(f"non-markdown file requires auto_convert: {suffix}")
 
         stored_filename = self._safe_filename(original_filename)
+        if trigger == "scheduled":
+            stored_filename = self._scheduled_stored_filename(stored_filename)
         relative_source_path = Path("raw") / "uploads" / stored_filename
         target_path = self._agent_root / relative_source_path
         if target_path.exists():
@@ -251,6 +261,7 @@ class IngestService:
             original_filename=original_filename,
             stored_filename=stored_filename,
             source_path=relative_source_path.as_posix(),
+            trigger=trigger,
             created_at=created_at,
         )
         self._queue.put(job.job_id)
@@ -714,6 +725,11 @@ class IngestService:
 
     def _load_llm_caller(self) -> Callable[[str, int | None], str]:
         return call_llm_main
+
+    @staticmethod
+    def _scheduled_stored_filename(value: str) -> str:
+        path = Path(value)
+        return f"{path.stem}-{uuid.uuid4().hex}{path.suffix}"
 
     @staticmethod
     def _safe_filename(value: str) -> str:

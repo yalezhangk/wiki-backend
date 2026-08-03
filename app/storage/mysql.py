@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterator
 
 from app.config import settings
 from app.schemas.chat import ChatMessageResponse, ChatResponse
-from app.schemas.ingest import IngestJobResponse, IngestValidation
+from app.schemas.ingest import IngestJobResponse, IngestTrigger, IngestValidation
 from app.schemas.query import CitationResponse
 from app.schemas.publish import PublicationResponse, PublishJobResponse, PublishStatusResponse
 from app.time_utils import beijing_now
@@ -29,6 +31,16 @@ class ChatNotFoundError(StorageError):
 
 class StorageUnavailableError(StorageError):
     """Raised when MySQL is unavailable or misconfigured."""
+
+
+@dataclass(frozen=True)
+class ScheduledIngestSource:
+    source_id: int
+    source_root: str
+    relative_path: str
+    state: str
+    attempt_count: int
+    ingest_job_id: int | None
 
 
 class MySQLStorage:
@@ -89,6 +101,7 @@ class MySQLStorage:
                         status VARCHAR(32) NOT NULL,
                         stage VARCHAR(32) NOT NULL DEFAULT 'uploaded',
                         progress_percent TINYINT UNSIGNED NOT NULL DEFAULT 0,
+                        `trigger` VARCHAR(32) NOT NULL DEFAULT 'manual',
                         original_filename VARCHAR(255) NOT NULL,
                         stored_filename VARCHAR(255) NOT NULL,
                         source_path VARCHAR(500) NOT NULL,
@@ -102,6 +115,29 @@ class MySQLStorage:
                         updated_at DATETIME NOT NULL,
                         finished_at DATETIME NULL
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS scheduled_ingest_sources (
+                        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+                        source_key CHAR(64) NOT NULL,
+                        source_root VARCHAR(500) NOT NULL,
+                        relative_path VARCHAR(1000) NOT NULL,
+                        source_device BIGINT UNSIGNED NOT NULL,
+                        source_inode BIGINT UNSIGNED NOT NULL,
+                        state VARCHAR(32) NOT NULL,
+                        first_seen_at DATETIME NOT NULL,
+                        last_attempt_at DATETIME NOT NULL,
+                        finished_at DATETIME NULL,
+                        ingest_job_id BIGINT UNSIGNED NULL,
+                        attempt_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
+                        last_error VARCHAR(1000) NULL,
+                        UNIQUE KEY uq_scheduled_ingest_source_key (source_key),
+                        UNIQUE KEY uq_scheduled_ingest_file_identity (source_device, source_inode),
+                        INDEX idx_scheduled_ingest_sources_state (state, last_attempt_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    COMMENT='DGX定时Markdown入库源文件清单'
                     """
                 )
                 cursor.execute(
@@ -190,6 +226,7 @@ class MySQLStorage:
                     """
                 )
                 self._ensure_ingest_progress_columns(cursor)
+                self._ensure_ingest_trigger_column(cursor)
                 self._ensure_message_citations_column(cursor)
                 self._apply_schema_comments(cursor)
                 self._ensure_index(cursor, "chats", "idx_chats_updated_at", "updated_at DESC")
@@ -509,6 +546,7 @@ class MySQLStorage:
         original_filename: str,
         stored_filename: str,
         source_path: str,
+        trigger: IngestTrigger = "manual",
         created_at: datetime,
     ) -> IngestJobResponse:
         empty_array = json.dumps([], ensure_ascii=False)
@@ -518,15 +556,16 @@ class MySQLStorage:
                 cursor.execute(
                     """
                     INSERT INTO ingest_jobs (
-                        status, stage, progress_percent,
+                        status, stage, progress_percent, `trigger`,
                         original_filename, stored_filename, source_path,
                         created_pages, updated_pages, contradictions, validation,
                         error, created_at, started_at, updated_at, finished_at
                     )
-                    VALUES (%s, 'uploaded', 0, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NULL, %s, NULL)
+                    VALUES (%s, 'uploaded', 0, %s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NULL, %s, NULL)
                     """,
                     (
                         status,
+                        trigger,
                         original_filename,
                         stored_filename,
                         source_path,
@@ -544,6 +583,173 @@ class MySQLStorage:
         if row is None:
             raise StorageError("Failed to reload created ingest job.")
         return self._ingest_job_from_row(row)
+
+    def claim_scheduled_ingest_source(
+        self,
+        *,
+        source_root: str,
+        relative_path: str,
+        source_device: int,
+        source_inode: int,
+        now: datetime,
+    ) -> ScheduledIngestSource | None:
+        source_key = self._scheduled_ingest_source_key(source_root, relative_path)
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT * FROM scheduled_ingest_sources
+                    WHERE source_key = %s
+                       OR (source_device = %s AND source_inode = %s)
+                    FOR UPDATE
+                    """,
+                    (source_key, source_device, source_inode),
+                )
+                existing = cursor.fetchone()
+                if existing is not None:
+                    return None
+                cursor.execute(
+                    """
+                    INSERT INTO scheduled_ingest_sources (
+                        source_key, source_root, relative_path, source_device, source_inode,
+                        state, first_seen_at, last_attempt_at,
+                        finished_at, ingest_job_id, attempt_count, last_error
+                    ) VALUES (%s, %s, %s, %s, %s, 'processing', %s, %s, NULL, NULL, 0, NULL)
+                    """,
+                    (source_key, source_root, relative_path, source_device, source_inode, now, now),
+                )
+                source_id = int(cursor.lastrowid)
+        return ScheduledIngestSource(
+            source_id=source_id,
+            source_root=source_root,
+            relative_path=relative_path,
+            state="processing",
+            attempt_count=0,
+            ingest_job_id=None,
+        )
+
+    def record_scheduled_ingest_attempt(
+        self,
+        *,
+        source_id: int,
+        ingest_job_id: int | None,
+        attempted_at: datetime,
+    ) -> None:
+        self._execute_update(
+            """
+            UPDATE scheduled_ingest_sources
+            SET attempt_count = attempt_count + 1,
+                ingest_job_id = COALESCE(%s, ingest_job_id),
+                last_attempt_at = %s,
+                last_error = NULL
+            WHERE id = %s AND state = 'processing'
+            """,
+            (ingest_job_id, attempted_at, source_id),
+        )
+
+    def set_scheduled_ingest_job(self, *, source_id: int, ingest_job_id: int) -> None:
+        self._execute_update(
+            """
+            UPDATE scheduled_ingest_sources
+            SET ingest_job_id = %s
+            WHERE id = %s AND state = 'processing'
+            """,
+            (ingest_job_id, source_id),
+        )
+
+    def complete_scheduled_ingest_source(
+        self,
+        *,
+        source_id: int,
+        state: str,
+        error: str | None,
+        finished_at: datetime,
+    ) -> None:
+        if state not in {"succeeded", "failed"}:
+            raise StorageError(f"Invalid scheduled ingest terminal state: {state}")
+        self._execute_update(
+            """
+            UPDATE scheduled_ingest_sources
+            SET state = %s, last_error = %s, finished_at = %s
+            WHERE id = %s AND state = 'processing'
+            """,
+            (state, error, finished_at, source_id),
+        )
+
+    def recover_scheduled_ingest_sources(self, *, now: datetime) -> list[str]:
+        recovery_errors: list[str] = []
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT s.id, s.relative_path, s.ingest_job_id,
+                           j.status AS ingest_status, j.error AS ingest_error
+                    FROM scheduled_ingest_sources AS s
+                    LEFT JOIN ingest_jobs AS j ON j.id = s.ingest_job_id
+                    WHERE s.state = 'processing'
+                    FOR UPDATE
+                    """
+                )
+                rows = cursor.fetchall()
+                for row in rows:
+                    source_id = int(row["id"])
+                    if row["ingest_job_id"] is None:
+                        # The request outcome is unknowable without a persisted job ID.  Mark it
+                        # terminal rather than resubmitting and risking a duplicate Wiki write.
+                        error = "同步进程在持久化 ingest job ID 前中断；为避免重复入库，不会自动重试"
+                        cursor.execute(
+                            """
+                            UPDATE scheduled_ingest_sources
+                            SET state = 'failed', finished_at = %s, last_error = %s
+                            WHERE id = %s
+                            """,
+                            (now, error, source_id),
+                        )
+                        recovery_errors.append(f"{row['relative_path']}: {error}")
+                    elif row["ingest_status"] == "succeeded":
+                        cursor.execute(
+                            """
+                            UPDATE scheduled_ingest_sources
+                            SET state = 'succeeded', finished_at = %s, last_error = NULL
+                            WHERE id = %s
+                            """,
+                            (now, source_id),
+                        )
+                    elif row["ingest_status"] == "failed":
+                        error = row["ingest_error"] or "关联的 ingest job 失败"
+                        cursor.execute(
+                            """
+                            UPDATE scheduled_ingest_sources
+                            SET state = 'failed', finished_at = %s, last_error = %s
+                            WHERE id = %s
+                            """,
+                            (now, error, source_id),
+                        )
+                        recovery_errors.append(f"{row['relative_path']}: {error}")
+                    elif row["ingest_status"] is None:
+                        error = "关联的 ingest job 不存在"
+                        cursor.execute(
+                            """
+                            UPDATE scheduled_ingest_sources
+                            SET state = 'failed', finished_at = %s,
+                                last_error = %s
+                            WHERE id = %s
+                            """,
+                            (now, error, source_id),
+                        )
+                        recovery_errors.append(f"{row['relative_path']}: {error}")
+                    else:
+                        error = "关联的 ingest job 在前次同步结束后仍未进入终态"
+                        cursor.execute(
+                            """
+                            UPDATE scheduled_ingest_sources
+                            SET state = 'failed', finished_at = %s, last_error = %s
+                            WHERE id = %s
+                            """,
+                            (now, error, source_id),
+                        )
+                        recovery_errors.append(f"{row['relative_path']}: {error}")
+        return recovery_errors
 
     def get_ingest_job(self, job_id: int) -> IngestJobResponse | None:
         rows = self._fetch_all("SELECT * FROM ingest_jobs WHERE id = %s", (job_id,))
@@ -1243,6 +1449,30 @@ class MySQLStorage:
             cursor.execute("ALTER TABLE ingest_jobs MODIFY COLUMN updated_at DATETIME NOT NULL")
 
     @staticmethod
+    def _ensure_ingest_trigger_column(cursor: Any) -> None:
+        cursor.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'ingest_jobs'
+              AND COLUMN_NAME = 'trigger'
+            """
+        )
+        if cursor.fetchone() is None:
+            cursor.execute(
+                """
+                ALTER TABLE ingest_jobs
+                ADD COLUMN `trigger` VARCHAR(32) NOT NULL DEFAULT 'manual' AFTER progress_percent
+                """
+            )
+
+    @staticmethod
+    def _scheduled_ingest_source_key(source_root: str, relative_path: str) -> str:
+        payload = f"{source_root}\x00{relative_path}".encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
     def _apply_schema_comments(cursor: Any) -> None:
         # CREATE TABLE IF NOT EXISTS does not update comments on existing tables.
         expected_table_comments = {
@@ -1588,6 +1818,7 @@ class MySQLStorage:
             stage=row.get("stage", "uploaded"),
             progress_percent=int(row.get("progress_percent", 0)),
             original_filename=str(row["original_filename"]),
+            trigger=row.get("trigger", "manual"),
             source_path=str(row["source_path"]),
             created_pages=self._parse_json_field(row.get("created_pages")),
             updated_pages=self._parse_json_field(row.get("updated_pages")),

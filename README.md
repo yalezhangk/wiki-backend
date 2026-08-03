@@ -69,6 +69,7 @@ http://127.0.0.1:8081/docs
 - `chats.id`、`chat_messages.chat_id`、`ingest_jobs.job_id`、`publish_jobs.job_id` 与发布状态中的 `job_id` 均为正整数 JSON number。此前 UUID 路径和 UUID 请求体不再兼容，会返回 `422`。
 - 数据库业务时间字段精确到秒，当前序列化为不带 `Z` 或时区偏移的 ISO 8601 字符串。部署本变更后新建或更新的记录按北京时间（`Asia/Shanghai`）写入，例如 `2026-07-22T18:01:08`；既有记录保留原始 UTC 数值，不做迁移。
 - `source_path` 相对于 `WIKI_AGENT_REPO_PATH` 指向的 agent 仓库根目录，例如 `raw/uploads/report.md`。
+- Ingest 响应的 `trigger` 表示任务来源：`manual` 为 UI/API 人工上传，`scheduled` 为 DGX 定时 Markdown 同步；旧记录兼容为 `manual`。
 - `relevant_pages`、`created_pages`、`updated_pages`、`synthesis_path` 和 Synthesis 响应中的 `path` 都是相对于 `llm-wiki-agent/wiki` 的路径，统一使用 `/` 分隔符。
 - `sources` 是本次回答可引用的 Wiki 根目录相对路径，按检索顺序稳定去重，统一使用 `/` 分隔符并保留 `.md` 后缀。`POST /api/query` 正文中的 `[n]` 对应 `sources[n - 1]`；聊天回答使用实际 Wiki 页面链接。`relevant_pages` 仍表示检索到的扩展阅读上下文。
 - `POST /api/query` 保持无状态，不会隐式创建 Chat。`POST /api/ingest/jobs` 返回 `202 Accepted` 仅表示任务已入队，`succeeded` 也不表示 Quartz 已发布。
@@ -154,6 +155,11 @@ WIKI_BACKEND_DEFAULT_CHAT_TITLE=新对话
 WIKI_BACKEND_CHAT_HISTORY_LIMIT=6
 WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES=10485760
 WIKI_BACKEND_INGEST_LLM_MAX_TOKENS=8192
+# 仅在启用 DGX 定时 Markdown 同步时配置；不要提交真实目录。
+WIKI_BACKEND_SCHEDULED_INGEST_ROOT=/path/to/source-directory
+WIKI_BACKEND_SCHEDULED_INGEST_API_URL=http://127.0.0.1:8081
+WIKI_BACKEND_SCHEDULED_INGEST_POLL_SECONDS=2
+WIKI_BACKEND_SCHEDULED_INGEST_POLL_TIMEOUT_SECONDS=7200
 WIKI_BACKEND_LLM_FAST_PROVIDER=deepseek
 WIKI_BACKEND_LLM_FAST_MODEL=deepseek-v4-flash
 WIKI_BACKEND_LLM_MAIN_PROVIDER=deepseek
@@ -365,6 +371,49 @@ curl --fail --silent --show-error http://127.0.0.1:8080/api/chats > /dev/null
 ```
 
 如果只是没有依赖变化的小型代码更新，在测试通过后可以直接执行 `sudo systemctl restart wiki-backend.service`。`/api/health` 只验证 FastAPI 进程存活，仍需通过 `/api/chats` 检查 MySQL 路径。
+
+### 每日增量 Markdown 入库
+
+配置 `WIKI_BACKEND_SCHEDULED_INGEST_ROOT` 后，`.venv/bin/python -m app.scheduled_ingest` 会递归扫描
+该目录的普通 `.md` 文件，不跟随符号链接。首次运行处理现有文件；后续仅处理此前未记录的路径和文件
+身份。文件在快照期间仍发生变化时会留待下次运行。空 Markdown 会进入现有 Ingest 校验流程，并在两次
+失败后成为最终失败记录，而不会每天无限延后。每个失败文件只尝试两次，第二次失败后保存最终失败审计并
+不再每日重试。同步命令只经 `http://127.0.0.1:8081` 调用现有 Ingest API，成功任务仍由后端自动排队
+Quartz 发布。
+
+如果同步进程异常中断，下一次运行会先核对遗留记录：已经终态的任务会归并结果；无法确认请求结果、
+关联任务丢失或前次任务仍未终态的记录会标记为最终失败并写入错误日志，不会自动重传造成重复 Wiki 写入。
+
+将仓库中的示例复制为 systemd 单元，并把占位符替换为 DGX 实际运行用户和项目目录：
+
+```bash
+sudo cp docs/wiki-backend-scheduled-ingest.service.example \
+  /etc/systemd/system/wiki-backend-scheduled-ingest.service
+sudo cp docs/wiki-backend-scheduled-ingest.timer.example \
+  /etc/systemd/system/wiki-backend-scheduled-ingest.timer
+sudo systemd-analyze verify /etc/systemd/system/wiki-backend-scheduled-ingest.service
+sudo systemd-analyze verify /etc/systemd/system/wiki-backend-scheduled-ingest.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now wiki-backend-scheduled-ingest.timer
+systemctl list-timers wiki-backend-scheduled-ingest.timer
+```
+
+首次部署先人工运行一次并检查日志；该操作会真实写 MySQL、Wiki 与发布队列：
+
+```bash
+sudo systemctl start wiki-backend-scheduled-ingest.service
+sudo journalctl -u wiki-backend-scheduled-ingest.service -n 200 --no-pager
+```
+
+同步程序会在 journal 和 `/home/dgx/Logs/knowledge_base_mkt/wiki-backend/wiki-backend.log` 记录：
+扫描到的 Markdown 总数、每个处理或跳过的相对路径与原因、每次 API 尝试的 job ID，以及最终
+`scanned/candidates/succeeded/failed/deferred/skipped` 汇总。服务完成后显示 `inactive (dead)`
+是 `Type=oneshot` 的正常结果；应结合 `Result=success` 和上述汇总判断。
+
+定时器使用 `Persistent=true`，主机在 03:00 未运行时，会在恢复后补跑一次。服务运行用户必须能读取
+受控源目录，并拥有已有 `wiki-backend.service` 所需的 Wiki、Quartz 发布和 MySQL 权限；不要用 `root`
+运行该同步服务。示例中的 `TimeoutStartSec=infinity` 是必要配置：一次同步会逐个等待 Ingest 任务完成，
+不能使用 systemd 默认的短启动超时。
 
 ### 通过 SSH 隧道访问 FastAPI 文档
 

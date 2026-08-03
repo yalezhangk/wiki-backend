@@ -52,6 +52,24 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias="WIKI_BACKEND_INGEST_LLM_MAX_TOKENS",
     )
+    scheduled_ingest_root: Path | None = Field(
+        default=None,
+        validation_alias="WIKI_BACKEND_SCHEDULED_INGEST_ROOT",
+    )
+    scheduled_ingest_api_url: str = Field(
+        default="http://127.0.0.1:8081",
+        validation_alias="WIKI_BACKEND_SCHEDULED_INGEST_API_URL",
+    )
+    scheduled_ingest_poll_seconds: float = Field(
+        default=2.0,
+        gt=0.0,
+        validation_alias="WIKI_BACKEND_SCHEDULED_INGEST_POLL_SECONDS",
+    )
+    scheduled_ingest_poll_timeout_seconds: int = Field(
+        default=7200,
+        gt=0,
+        validation_alias="WIKI_BACKEND_SCHEDULED_INGEST_POLL_TIMEOUT_SECONDS",
+    )
     quartz_repo_path: Path = Field(
         default=(PROJECT_ROOT.parent / "quartz").resolve(),
         validation_alias="WIKI_BACKEND_QUARTZ_REPO_PATH",

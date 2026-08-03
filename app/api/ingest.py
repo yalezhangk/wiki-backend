@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Request, UploadFile, status
 
-from app.schemas.ingest import IngestJobResponse
+from app.schemas.ingest import IngestJobResponse, IngestTrigger
 from app.services.ingest_service import (
     IngestConflictError,
     IngestNotFoundError,
@@ -38,6 +38,8 @@ def get_ingest_service(request: Request) -> IngestService:
         "\n"
         "- `auto_convert` 默认为 `true`，允许服务端先把非 Markdown 文件转换为 Markdown"
         "\n"
+        "- `trigger` 默认为 `manual`；DGX 本机定时同步使用 `scheduled`"
+        "\n"
         "- 服务端按 `WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES` 限制大小，并校验声明类型和关键文件签名"
         "\n"
         "- 返回 `202 Accepted` 表示任务已入队，不表示 Wiki 写入已经完成"
@@ -46,12 +48,17 @@ def get_ingest_service(request: Request) -> IngestService:
 async def create_ingest_job(
     file: UploadFile = File(...),
     auto_convert: bool = Form(default=True),
+    trigger: IngestTrigger = Form(default="manual"),
     ingest_service: IngestService = Depends(get_ingest_service),
 ) -> IngestJobResponse:
     """保存上传文件，创建 Ingest 任务，并返回初始任务状态。"""
     try:
         # Ingest 写入 Wiki 的过程由后台 worker 执行，这里只负责创建并入队任务。
-        return await ingest_service.create_job(file=file, auto_convert=auto_convert)
+        return await ingest_service.create_job(
+            file=file,
+            auto_convert=auto_convert,
+            trigger=trigger,
+        )
     except IngestValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except IngestConflictError as exc:

@@ -1,0 +1,18 @@
+[Unit]
+Description=Synchronize new Markdown files into wiki-backend
+Requires=wiki-backend.service
+After=wiki-backend.service
+
+[Service]
+Type=oneshot
+User=<DGX_USER>
+Group=<DGX_GROUP>
+WorkingDirectory=<WIKI_BACKEND_DIR>
+Environment=HOME=<DGX_HOME>
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=<WIKI_BACKEND_DIR>/.env
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wiki-backend-scheduled-ingest
+TimeoutStartSec=infinity
+ExecStart=<WIKI_BACKEND_DIR>/.venv/bin/python -m app.scheduled_ingest

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from app.schemas.publish import PublicationResponse
 
 IngestJobStatus = Literal["queued", "running", "succeeded", "failed"]
+IngestTrigger = Literal["manual", "scheduled"]
 IngestStage = Literal[
     "uploaded",
     "converting",
@@ -52,6 +53,10 @@ class IngestJobResponse(BaseModel):
     stage: IngestStage = Field(description="任务当前真实处理阶段；不包含 Quartz 发布阶段。")
     progress_percent: int = Field(ge=0, le=100, description="当前阶段对应的离散进度，不表示发布进度。")
     original_filename: str = Field(description="上传时的原始文件名，不包含客户端目录。")
+    trigger: IngestTrigger = Field(
+        default="manual",
+        description="任务来源；manual 表示人工上传，scheduled 表示 DGX 定时同步。",
+    )
     source_path: str = Field(description="相对于 agent 仓库根目录的上传源文件路径。")
     created_pages: list[str] = Field(
         default_factory=list,

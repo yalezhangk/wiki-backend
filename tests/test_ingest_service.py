@@ -32,6 +32,41 @@ class FakeMigrationCursor:
     def fetchall(self) -> list[dict[str, str]]:
         return []
 
+    def fetchone(self) -> None:
+        return None
+
+
+class FakeScheduledRecoveryCursor:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self.queries: list[tuple[str, tuple[object, ...] | None]] = []
+        self.rows = rows
+
+    def execute(self, query: str, values: tuple[object, ...] | None = None) -> None:
+        self.queries.append((" ".join(query.split()), values))
+
+    def fetchall(self) -> list[dict[str, object]]:
+        return self.rows
+
+
+class FakeScheduledRecoveryConnection:
+    def __init__(self, cursor: FakeScheduledRecoveryCursor) -> None:
+        self._cursor = cursor
+
+    def __enter__(self) -> "FakeScheduledRecoveryConnection":
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        return None
+
+    def cursor(self) -> "FakeScheduledRecoveryConnection":
+        return self
+
+    def execute(self, query: str, values: tuple[object, ...] | None = None) -> None:
+        self._cursor.execute(query, values)
+
+    def fetchall(self) -> list[dict[str, object]]:
+        return self._cursor.fetchall()
+
 
 class FakeStorage:
     def __init__(self) -> None:
@@ -48,6 +83,7 @@ class FakeStorage:
         original_filename: str,
         stored_filename: str,
         source_path: str,
+        trigger: str = "manual",
         created_at: datetime,
     ) -> IngestJobResponse:
         job_id = len(self.jobs) + 1
@@ -57,6 +93,7 @@ class FakeStorage:
             stage="uploaded",
             progress_percent=0,
             original_filename=original_filename,
+            trigger=trigger,
             source_path=source_path,
             validation=IngestValidation(),
             created_at=created_at,
@@ -157,8 +194,20 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(job.progress_percent, 0)
         self.assertEqual(job.updated_at, job.created_at)
         self.assertEqual(job.original_filename, "report.md")
+        self.assertEqual(job.trigger, "manual")
         self.assertTrue((self.agent_root / job.source_path).exists())
         self.assertEqual(job.source_path, "raw/uploads/report.md")
+
+    def test_scheduled_job_uses_unique_stored_filename_and_trigger(self) -> None:
+        first_upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
+        second_upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
+
+        first_job = asyncio.run(self.service.create_job(file=first_upload, trigger="scheduled"))
+        second_job = asyncio.run(self.service.create_job(file=second_upload, trigger="scheduled"))
+
+        self.assertEqual(first_job.trigger, "scheduled")
+        self.assertEqual(second_job.trigger, "scheduled")
+        self.assertNotEqual(first_job.source_path, second_job.source_path)
 
     def test_create_job_rejects_empty_file(self) -> None:
         upload = UploadFile(filename="empty.md", file=io.BytesIO(b""))
@@ -537,6 +586,43 @@ class IngestServiceTests(unittest.TestCase):
         self.assertIn("WHEN status = 'running' THEN 'extracting'", statements)
         self.assertIn("COALESCE(finished_at, started_at, created_at)", statements)
         self.assertIn("MODIFY COLUMN updated_at DATETIME NOT NULL", statements)
+
+    def test_mysql_upgrade_adds_ingest_trigger_column(self) -> None:
+        cursor = FakeMigrationCursor()
+
+        MySQLStorage._ensure_ingest_trigger_column(cursor)
+
+        self.assertIn("ADD COLUMN `trigger` VARCHAR(32) NOT NULL DEFAULT 'manual'", "\n".join(cursor.queries))
+
+    def test_mysql_recovery_marks_unknown_or_nonterminal_scheduled_jobs_failed(self) -> None:
+        now = datetime(2026, 8, 3, 3, 0, 0)
+        cursor = FakeScheduledRecoveryCursor(
+            [
+                {
+                    "id": 1,
+                    "relative_path": "unknown.md",
+                    "ingest_job_id": None,
+                    "ingest_status": None,
+                    "ingest_error": None,
+                },
+                {
+                    "id": 2,
+                    "relative_path": "queued.md",
+                    "ingest_job_id": 9,
+                    "ingest_status": "queued",
+                    "ingest_error": None,
+                },
+            ]
+        )
+        storage = MySQLStorage("host", 3306, "user", "password", "database")
+
+        with patch.object(storage, "connect", return_value=FakeScheduledRecoveryConnection(cursor)):
+            errors = storage.recover_scheduled_ingest_sources(now=now)
+
+        statements = "\n".join(query for query, _ in cursor.queries)
+        self.assertEqual(len(errors), 2)
+        self.assertNotIn("DELETE FROM scheduled_ingest_sources", statements)
+        self.assertEqual(statements.count("SET state = 'failed'"), 2)
 
     def test_failure_preserves_last_persisted_stage(self) -> None:
         upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))

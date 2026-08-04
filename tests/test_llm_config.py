@@ -5,13 +5,38 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.config import settings
-from app.llm_config import LLMConfigError, LLMResponseTruncatedError, _resolve_model, call_llm_fast
+from app.llm_config import (
+    LLMConfigError,
+    LLMResponseTruncatedError,
+    _resolve_model,
+    call_llm_fast,
+)
 
 
 class LLMConfigTests(unittest.TestCase):
     def test_resolve_model_adds_provider_prefix(self) -> None:
         self.assertEqual(_resolve_model("deepseek", "deepseek-chat"), "deepseek/deepseek-chat")
-        self.assertEqual(_resolve_model("ollama", "ollama/llama3.1"), "ollama/llama3.1")
+        self.assertEqual(_resolve_model("ollama_chat", "qwen3.6:27b"), "ollama_chat/qwen3.6:27b")
+
+    @patch("app.llm_config.completion")
+    def test_ollama_chat_uses_shared_endpoint_without_api_key(self, completion_mock: Mock) -> None:
+        completion_mock.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))]
+        )
+
+        with (
+            patch.object(settings, "llm_provider", "ollama_chat"),
+            patch.object(settings, "llm_fast_model", "qwen3.6:27b"),
+            patch.object(settings, "llm_api_key", "remote-provider-key"),
+            patch.object(settings, "llm_api_base", "http://127.0.0.1:11434"),
+        ):
+            result = call_llm_fast("prompt", max_tokens=512)
+
+        self.assertEqual(result, "answer")
+        kwargs = completion_mock.call_args.kwargs
+        self.assertEqual(kwargs["model"], "ollama_chat/qwen3.6:27b")
+        self.assertEqual(kwargs["api_base"], "http://127.0.0.1:11434")
+        self.assertNotIn("api_key", kwargs)
 
     @patch("app.llm_config.completion")
     def test_fast_call_uses_backend_settings(self, completion_mock: Mock) -> None:
@@ -20,7 +45,7 @@ class LLMConfigTests(unittest.TestCase):
         )
 
         with (
-            patch.object(settings, "llm_fast_provider", "deepseek"),
+            patch.object(settings, "llm_provider", "deepseek"),
             patch.object(settings, "llm_fast_model", "deepseek-chat"),
             patch.object(settings, "llm_api_key", "test-key"),
             patch.object(settings, "llm_api_base", "http://llm.local"),

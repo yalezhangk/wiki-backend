@@ -102,17 +102,13 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias="WIKI_BACKEND_QUALITY_STALE_AFTER_HOURS",
     )
-    llm_fast_provider: str = Field(
+    llm_provider: str = Field(
         default="deepseek",
-        validation_alias="WIKI_BACKEND_LLM_FAST_PROVIDER",
+        validation_alias="WIKI_BACKEND_LLM_PROVIDER",
     )
     llm_fast_model: str = Field(
         default="deepseek-v4-flash",
         validation_alias="WIKI_BACKEND_LLM_FAST_MODEL",
-    )
-    llm_main_provider: str = Field(
-        default="deepseek",
-        validation_alias="WIKI_BACKEND_LLM_MAIN_PROVIDER",
     )
     llm_main_model: str = Field(
         default="deepseek-v4-pro",

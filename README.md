@@ -161,15 +161,32 @@ WIKI_BACKEND_SCHEDULED_INGEST_ROOT=/path/to/source-directory
 WIKI_BACKEND_SCHEDULED_INGEST_API_URL=http://127.0.0.1:8081
 WIKI_BACKEND_SCHEDULED_INGEST_POLL_SECONDS=2
 WIKI_BACKEND_SCHEDULED_INGEST_POLL_TIMEOUT_SECONDS=7200
-WIKI_BACKEND_LLM_FAST_PROVIDER=deepseek
+WIKI_BACKEND_LLM_PROVIDER=deepseek
 WIKI_BACKEND_LLM_FAST_MODEL=deepseek-v4-flash
-WIKI_BACKEND_LLM_MAIN_PROVIDER=deepseek
 WIKI_BACKEND_LLM_MAIN_MODEL=deepseek-v4-pro
 WIKI_BACKEND_LLM_API_KEY=
 WIKI_BACKEND_LLM_API_BASE=
 ```
 
 真实 `.env` 不提交 Git。DGX 上使用 Linux 路径，不要写入 Windows 反斜杠路径。模型密钥只写入服务器 `.env`；不要把 `llm-wiki-agent/tools/llm_config.py` 中的本地配置或密钥复制到本项目。
+
+LLM 只使用一套连接配置：`WIKI_BACKEND_LLM_PROVIDER`、`WIKI_BACKEND_LLM_API_KEY` 和 `WIKI_BACKEND_LLM_API_BASE`。`FAST_MODEL` 仅用于页面选择、图关系推断等轻量任务，`MAIN_MODEL` 用于问答与 ingest；两者始终走同一个模型服务。对 `ollama` 或 `ollama_chat`，后端不会发送 API key。
+
+### 切换为 DGX 同机 Ollama
+
+LiteLLM 使用 `ollama_chat` 时会请求 Ollama 的 `/api/chat`，因此与你已验证的 `curl` 接口一致。后端与 Ollama 在同一台 DGX 上运行时使用 loopback 地址，不使用局域网地址或 `/v1` 后缀：
+
+```env
+WIKI_BACKEND_LLM_PROVIDER=ollama_chat
+WIKI_BACKEND_LLM_FAST_MODEL=qwen3.6:27b
+WIKI_BACKEND_LLM_MAIN_MODEL=qwen3.6:27b
+WIKI_BACKEND_LLM_API_KEY=
+WIKI_BACKEND_LLM_API_BASE=http://127.0.0.1:11434
+WIKI_BACKEND_LLM_FAST_MAX_TOKENS=5120
+WIKI_BACKEND_LLM_MAIN_MAX_TOKENS=8192
+```
+
+编辑 DGX 的私有 `.env` 后重启 `wiki-backend`；先以 `GET /api/health` 确认进程，再执行一次只读 `POST /api/query` 验证回答。不要把 Ollama `11434`、后端 `8081` 或真实 `.env` 暴露到公网。
 
 `WIKI_BACKEND_INGEST_LLM_MAX_TOKENS` 仅控制 Ingest 主模型的单次输出预算，默认保持兼容的 `16384`。提高该值前必须先确认所用模型支持对应上限；模型返回 `finish_reason=length` 时，任务会以可识别的截断错误失败，不会用相同 Prompt 盲目重试。
 

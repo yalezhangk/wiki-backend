@@ -98,6 +98,20 @@ class StartupDependencyTests(unittest.TestCase):
         self.assertEqual(settings.llm_fast_max_tokens, 768)
         self.assertEqual(settings.llm_main_max_tokens, 6144)
 
+    def test_llm_connection_settings_use_environment_values(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "WIKI_BACKEND_LLM_PROVIDER": "ollama_chat",
+                "WIKI_BACKEND_LLM_API_BASE": "http://127.0.0.1:11434",
+            },
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+
+        self.assertEqual(settings.llm_provider, "ollama_chat")
+        self.assertEqual(settings.llm_api_base, "http://127.0.0.1:11434")
+
     def test_services_do_not_require_agent_source_code_during_construction(self) -> None:
         missing_root = Path(tempfile.gettempdir()) / "missing-llm-wiki-agent-for-startup-test"
 

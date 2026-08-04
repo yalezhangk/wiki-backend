@@ -42,6 +42,16 @@ def _resolve_model(provider: str, model: str) -> str:
     return normalized_model
 
 
+def _is_ollama_provider(provider: str) -> bool:
+    return provider.strip().lower() in {"ollama", "ollama_chat"}
+
+
+def _resolve_api_key(provider: str) -> str | None:
+    if _is_ollama_provider(provider):
+        return None
+    return settings.llm_api_key
+
+
 def call_llm(
     prompt: str,
     *,
@@ -50,13 +60,12 @@ def call_llm(
     temperature: float | None = None,
 ) -> str:
     """Call the backend-configured LLM through LiteLLM."""
+    provider = settings.llm_provider
     if fast:
-        provider = settings.llm_fast_provider
         model = settings.llm_fast_model
         default_max_tokens = settings.llm_fast_max_tokens
         default_temperature = settings.llm_fast_temperature
     else:
-        provider = settings.llm_main_provider
         model = settings.llm_main_model
         default_max_tokens = settings.llm_main_max_tokens
         default_temperature = settings.llm_main_temperature
@@ -67,10 +76,12 @@ def call_llm(
         "max_tokens": max_tokens if max_tokens is not None else default_max_tokens,
         "temperature": temperature if temperature is not None else default_temperature,
     }
-    if settings.llm_api_key:
-        kwargs["api_key"] = settings.llm_api_key
-    if settings.llm_api_base:
-        kwargs["api_base"] = settings.llm_api_base
+    api_key = _resolve_api_key(provider)
+    api_base = settings.llm_api_base
+    if api_key:
+        kwargs["api_key"] = api_key
+    if api_base:
+        kwargs["api_base"] = api_base
 
     response = completion(**kwargs)
     try:

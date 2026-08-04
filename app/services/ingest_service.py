@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -10,7 +12,7 @@ import zipfile
 from datetime import date, datetime
 from pathlib import Path
 from queue import Queue
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Any, Callable, Protocol
 
 from fastapi import UploadFile
@@ -19,7 +21,13 @@ from pydantic import ValidationError
 from app.config import settings
 from app.llm_config import LLMConfigError, LLMResponseTruncatedError, call_llm_main
 from app.prompts import load_prompt, render_prompt
-from app.schemas.ingest import IngestJobResponse, IngestLLMResult, IngestTrigger, IngestValidation
+from app.schemas.ingest import (
+    IngestJobResponse,
+    IngestLLMFailure,
+    IngestLLMResult,
+    IngestTrigger,
+    IngestValidation,
+)
 from app.services.publish_service import PublishService
 from app.services.wiki_page_policy import iter_knowledge_pages
 from app.time_utils import beijing_now
@@ -88,6 +96,14 @@ ZIP_REQUIRED_PREFIXES = {
     ".pptx": "ppt/",
     ".xlsx": "xl/",
 }
+MIN_CONVERTED_CONTENT_CHARACTERS = 20
+MARKER_OCR_ARGUMENTS = (
+    "--mode",
+    "fast",
+    "--force_ocr",
+    "--disable_multiprocessing",
+    "--disable_tqdm",
+)
 
 
 class IngestServiceError(RuntimeError):
@@ -144,6 +160,26 @@ class IngestLLMInvalidJSONError(IngestLLMResponseError):
             "llm_json_invalid",
             "模型返回的入库数据不是有效 JSON，请检查服务日志后重试。",
         )
+
+
+class IngestLLMExtractionFailedError(IngestLLMResponseError):
+    """Raised when the LLM explicitly reports that the source cannot be ingested."""
+
+    def __init__(self, *, reason: str) -> None:
+        self.reason = reason
+        super().__init__(
+            "llm_ingest_failed",
+            "模型无法从文档中提取可用信息，请检查原文件或启用 OCR 后重试。",
+        )
+
+
+class IngestContentQualityError(IngestServiceError):
+    """Raised when source text is unusable before it is sent to the LLM."""
+
+    def __init__(self, category: str, user_message: str) -> None:
+        self.category = category
+        self.user_message = user_message
+        super().__init__(f"{category}: {user_message}")
 
 
 class IngestStorage(Protocol):
@@ -316,12 +352,50 @@ class IngestService:
 
     def _ingest_source(self, source_path: Path, *, job_id: int) -> dict[str, Any]:
         source = source_path
+        pdf_ocr_attempted = False
         if source_path.suffix.lower() != ".md":
             self._update_progress(job_id, "converting", 10)
-            source = self._convert_to_markdown(source_path)
+            if source_path.suffix.lower() == ".pdf":
+                has_text_layer = self._pdf_has_extractable_text(source_path)
+                pdf_ocr_attempted = not has_text_layer
+                source = self._convert_pdf_to_markdown(
+                    source_path,
+                    has_text_layer=has_text_layer,
+                )
+            else:
+                source = self._convert_to_markdown(source_path)
 
-        self._update_progress(job_id, "extracting", 35)
         source_content = source.read_text(encoding="utf-8")
+        try:
+            self._assert_source_content_quality(
+                source_content=source_content,
+                source_suffix=source_path.suffix.lower(),
+            )
+        except IngestContentQualityError as exc:
+            if source_path.suffix.lower() != ".pdf" or exc.category not in {
+                "conversion_empty",
+                "conversion_low_quality",
+            }:
+                raise
+            if pdf_ocr_attempted:
+                raise IngestContentQualityError(
+                    "ocr_failed",
+                    "已尝试 OCR，但未能提取足够的可读文本；请检查扫描件清晰度后重试。",
+                ) from exc
+            LOGGER.info("PDF native conversion quality was insufficient; starting OCR source=%s", source_path.name)
+            source = self._convert_pdf_with_marker(source_path)
+            source_content = source.read_text(encoding="utf-8")
+            try:
+                self._assert_source_content_quality(
+                    source_content=source_content,
+                    source_suffix=source_path.suffix.lower(),
+                )
+            except IngestContentQualityError as ocr_error:
+                raise IngestContentQualityError(
+                    "ocr_failed",
+                    "已尝试 OCR，但未能提取足够的可读文本；请检查扫描件清晰度后重试。",
+                ) from ocr_error
+        self._update_progress(job_id, "extracting", 35)
         prompt = self._build_prompt(source=source, source_content=source_content)
         try:
             raw = self._call_llm_with_retry(prompt)
@@ -346,7 +420,17 @@ class IngestService:
             job_id=job_id,
         )
         try:
+            if parsed.get("ingest_status") == "failed":
+                failure = IngestLLMFailure.model_validate(parsed)
+                LOGGER.warning(
+                    "LLM reported ingest extraction failure job_id=%s reason=%s",
+                    job_id,
+                    failure.ingest_error,
+                )
+                raise IngestLLMExtractionFailedError(reason=failure.ingest_error)
             data = IngestLLMResult.model_validate(parsed)
+        except IngestLLMExtractionFailedError:
+            raise
         except ValidationError as exc:
             debug_path = self._write_llm_debug_response(
                 source_path=source_path,
@@ -374,6 +458,34 @@ class IngestService:
             "contradictions": data.contradictions,
             "validation": validation,
         }
+
+    @staticmethod
+    def _assert_source_content_quality(*, source_content: str, source_suffix: str) -> None:
+        if not source_content.strip():
+            raise IngestContentQualityError(
+                "conversion_empty",
+                "文档未提取到可读文本；扫描版 PDF 请先启用 OCR 后重试。",
+            )
+
+        content_length = len(source_content)
+        control_characters = sum(
+            1
+            for character in source_content
+            if ord(character) < 32 and character not in "\n\r\t"
+        )
+        replacement_characters = source_content.count("\ufffd")
+        if (control_characters + replacement_characters) / content_length >= 0.01:
+            raise IngestContentQualityError(
+                "conversion_low_quality",
+                "文档转换结果包含过多无法识别的字符，请检查原文件后重试。",
+            )
+
+        readable_characters = sum(1 for character in source_content if character.isalnum())
+        if source_suffix != ".md" and readable_characters < MIN_CONVERTED_CONTENT_CHARACTERS:
+            raise IngestContentQualityError(
+                "conversion_low_quality",
+                "文档转换结果过短，无法可靠提取知识；扫描版 PDF 请先启用 OCR 后重试。",
+            )
 
 
     def _update_progress(self, job_id: int, stage: str, progress_percent: int) -> None:
@@ -592,6 +704,181 @@ class IngestService:
         output = source.with_suffix(".md")
         self._atomic_write(output, result.text_content)
         return output
+
+    def _pdf_has_extractable_text(self, source: Path) -> bool:
+        try:
+            page_texts = self._extract_pdf_page_texts(source)
+        except Exception as exc:
+            error_text = str(exc).lower()
+            if "password" in error_text or "encrypt" in error_text:
+                raise IngestContentQualityError(
+                    "pdf_encrypted",
+                    "PDF 已加密，无法读取；请提供未加密文件后重试。",
+                ) from exc
+            raise IngestContentQualityError(
+                "pdf_unreadable",
+                "PDF 无法读取或已损坏，请检查原文件后重试。",
+            ) from exc
+
+        return any(page_text.strip() for page_text in page_texts)
+
+    def _convert_pdf_to_markdown(self, source: Path, *, has_text_layer: bool) -> Path:
+        if not has_text_layer:
+            LOGGER.info("PDF has no text layer; starting OCR source=%s", source.name)
+            return self._convert_pdf_with_marker(source)
+
+        try:
+            return self._convert_to_markdown(source)
+        except IngestServiceError as markitdown_error:
+            LOGGER.warning(
+                "MarkItDown PDF conversion failed; trying PyMuPDF fallback source=%s",
+                source.name,
+            )
+            try:
+                return self._convert_pdf_with_pymupdf(source)
+            except IngestServiceError:
+                raise markitdown_error
+
+    def _convert_pdf_with_marker(self, source: Path) -> Path:
+        if not settings.ingest_enable_marker_ocr:
+            LOGGER.info("Marker OCR is disabled; using RapidOCR source=%s", source.name)
+            return self._convert_pdf_with_rapidocr(source)
+
+        marker_command = shutil.which("marker_single")
+        if marker_command is None:
+            LOGGER.warning("Marker OCR is unavailable; trying RapidOCR source=%s", source.name)
+            return self._convert_pdf_with_rapidocr(source)
+
+        with TemporaryDirectory(prefix="wiki-ingest-marker-") as temporary_directory:
+            try:
+                result = subprocess.run(
+                    [
+                        marker_command,
+                        str(source),
+                        "--output_dir",
+                        temporary_directory,
+                        *MARKER_OCR_ARGUMENTS,
+                    ],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    timeout=900,
+                )
+            except subprocess.TimeoutExpired:
+                LOGGER.warning("Marker OCR timed out; trying RapidOCR source=%s", source.name)
+                return self._convert_pdf_with_rapidocr(source)
+            if result.returncode != 0:
+                LOGGER.warning(
+                    "Marker OCR failed source=%s returncode=%s stderr=%s",
+                    source.name,
+                    result.returncode,
+                    result.stderr[-1000:],
+                )
+                return self._convert_pdf_with_rapidocr(source)
+
+            markdown_files = sorted(Path(temporary_directory).rglob("*.md"))
+            if not markdown_files:
+                LOGGER.warning("Marker OCR produced no Markdown; trying RapidOCR source=%s", source.name)
+                return self._convert_pdf_with_rapidocr(source)
+            markdown_content = markdown_files[0].read_text(encoding="utf-8")
+
+        try:
+            self._assert_source_content_quality(
+                source_content=markdown_content,
+                source_suffix=".pdf",
+            )
+        except IngestContentQualityError:
+            LOGGER.warning("Marker OCR output was low quality; trying RapidOCR source=%s", source.name)
+            return self._convert_pdf_with_rapidocr(source)
+
+        output = source.with_suffix(".md")
+        self._atomic_write(output, markdown_content)
+        return output
+
+    def _convert_pdf_with_rapidocr(self, source: Path) -> Path:
+        try:
+            import numpy as np
+            import pymupdf
+            from rapidocr import RapidOCR
+        except ImportError as exc:
+            raise IngestContentQualityError(
+                "ocr_unavailable",
+                "扫描 PDF 需要 RapidOCR，但服务未安装 rapidocr 或 onnxruntime。",
+            ) from exc
+
+        try:
+            document = pymupdf.open(source)
+            ocr_engine = RapidOCR()
+            pages: list[str] = []
+            for page_number, page in enumerate(document, start=1):
+                pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
+                image = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
+                    pixmap.height,
+                    pixmap.width,
+                    pixmap.n,
+                )
+                result = ocr_engine(image)
+                text_lines = getattr(result, "txts", ())
+                page_text = "\n".join(text.strip() for text in text_lines if text.strip())
+                if page_text:
+                    pages.append(f"## Page {page_number}\n\n{page_text}")
+        except Exception as exc:
+            raise IngestContentQualityError(
+                "ocr_failed",
+                "扫描 PDF 的 RapidOCR 处理失败，请检查服务日志后重试。",
+            ) from exc
+        finally:
+            if "document" in locals():
+                document.close()
+
+        markdown_content = "\n\n---\n\n".join(pages)
+        if not markdown_content.strip():
+            raise IngestContentQualityError(
+                "ocr_failed",
+                "扫描 PDF 的 RapidOCR 未生成可读文本，请检查原文件后重试。",
+            )
+
+        output = source.with_suffix(".md")
+        self._atomic_write(output, markdown_content)
+        return output
+
+    def _convert_pdf_with_pymupdf(self, source: Path) -> Path:
+        try:
+            import pymupdf
+        except ImportError as exc:
+            raise IngestServiceError("pymupdf is not installed") from exc
+
+        document: Any | None = None
+        try:
+            document = pymupdf.open(source)
+            pages = []
+            for page_number, page in enumerate(document, start=1):
+                page_text = page.get_text("text").strip()
+                if page_text:
+                    pages.append(f"## Page {page_number}\n\n{page_text}")
+        except Exception as exc:
+            raise IngestServiceError(f"PyMuPDF PDF conversion failed: {exc}") from exc
+        finally:
+            if document is not None:
+                document.close()
+
+        markdown_content = "\n\n---\n\n".join(pages)
+        if not markdown_content:
+            raise IngestServiceError("PyMuPDF produced no readable PDF text")
+
+        output = source.with_suffix(".md")
+        self._atomic_write(output, markdown_content)
+        return output
+
+    @staticmethod
+    def _extract_pdf_page_texts(source: Path) -> list[str]:
+        try:
+            import pdfplumber
+        except ImportError as exc:
+            raise IngestServiceError("pdfplumber is not installed") from exc
+
+        with pdfplumber.open(source) as document:
+            return [page.extract_text() or "" for page in document.pages]
 
     def _update_index(self, new_entry: str) -> None:
         content = self._read_text(self._index_file)

@@ -36,6 +36,8 @@ class IngestGeneratedPage(BaseModel):
 
 
 class IngestLLMResult(BaseModel):
+    ingest_status: Literal["succeeded"]
+    ingest_error: None
     title: str
     slug: str
     source_page: str
@@ -45,6 +47,11 @@ class IngestLLMResult(BaseModel):
     concept_pages: list[IngestGeneratedPage] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
     log_entry: str
+
+
+class IngestLLMFailure(BaseModel):
+    ingest_status: Literal["failed"]
+    ingest_error: str = Field(min_length=1, max_length=1000)
 
 
 class IngestJobResponse(BaseModel):

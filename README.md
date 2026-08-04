@@ -90,7 +90,7 @@ Ingest 响应在保留 `status` 的同时提供 `stage`、`progress_percent` 和
 | `validating` | 85 | 正在检查断链和未索引页面 |
 | `completed` | 100 | 知识文件写入和校验已完成 |
 
-失败任务保留失败前最后一个 `stage` 和 `progress_percent`。这些百分比是离散阶段值，不表示阶段内部完成度，也不包含 Quartz build/publish 进度。
+失败任务保留失败前最后一个 `stage` 和 `progress_percent`。这些百分比是离散阶段值，不表示阶段内部完成度，也不包含 Quartz build/publish 进度。PDF 会先检查加密和损坏；没有文本层或符号伪文本时，所有系统默认使用本地 `RapidOCR + ONNX Runtime`，不依赖 Docker。原生文本 PDF 优先使用 MarkItDown，失败时使用 PyMuPDF 提取文本。`marker-pdf` 是可选的高保真 OCR，只有安装 `requirements-marker.txt` 并设置 `WIKI_BACKEND_INGEST_ENABLE_MARKER_OCR=true` 后才会尝试；Marker 超时、报错、无输出或低质量输出都会回退 RapidOCR。若 OCR 未安装、超时或仍无法提取正文，任务会以 `ocr_unavailable` 或 `ocr_failed` 结束，不会写入 Wiki 或触发 Quartz 发布；LLM 必须显式返回 `ingest_status: "succeeded"`，否则任务不会成功。
 
 上传文件采用分块读取，默认最大为 10 MiB，可通过
 `WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES` 调整。服务端会校验声明的 MIME 类型；PDF、Office、EPUB、XLS、RTF、WAV 和 MP3 等格式还会检查文件签名或容器结构。校验失败的临时上传文件会被删除，不创建 Ingest 任务。
@@ -155,6 +155,7 @@ WIKI_BACKEND_DEFAULT_CHAT_TITLE=新对话
 WIKI_BACKEND_CHAT_HISTORY_LIMIT=6
 WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES=10485760
 WIKI_BACKEND_INGEST_LLM_MAX_TOKENS=8192
+WIKI_BACKEND_INGEST_ENABLE_MARKER_OCR=false
 # 仅在启用 DGX 定时 Markdown 同步时配置；不要提交真实目录。
 WIKI_BACKEND_SCHEDULED_INGEST_ROOT=/path/to/source-directory
 WIKI_BACKEND_SCHEDULED_INGEST_API_URL=http://127.0.0.1:8081
@@ -259,6 +260,8 @@ cd /home/dgx/Projects/knowledge_base_mkt/wiki-backend
 
 uv venv --python 3.12
 uv pip install --python .venv/bin/python -r requirements.txt
+.venv/bin/python -m pip check
+.venv/bin/python -c "import pdfplumber, pymupdf; from rapidocr import RapidOCR"
 
 .venv/bin/python -m uvicorn app.main:app \
   --host 127.0.0.1 \
@@ -267,7 +270,14 @@ uv pip install --python .venv/bin/python -r requirements.txt
 
 当前显式 Uvicorn 命令和模块内置入口都只监听 `127.0.0.1:8081`，不会监听 `0.0.0.0`，因此不能再通过 DGX 的局域网地址直接访问 `8081`。生产环境仍不要直接执行 `.venv/bin/python -m app.main`，因为模块内置入口会启用 reload；长期运行应使用上面的显式 Uvicorn 命令，或使用等价的 systemd 服务配置。
 
-依赖更新后应先在 DGX ARM64 上重新安装和验证，再重启长期运行进程。
+默认依赖不安装 `marker-pdf` 或 `pymupdf4llm`：文本 PDF 使用 MarkItDown/PyMuPDF，扫描 PDF 使用 RapidOCR。RapidOCR 首次处理扫描件会下载 OCR 模型，因此应在部署阶段上传一份非敏感扫描 PDF 预热一次；成功前不要启动长期运行服务。只有确实需要更复杂版面还原、且已验证 Docker、GPU、模型下载和输出质量时，才安装可选 Marker 并在服务器 `.env` 中启用：
+
+```bash
+uv pip install --python .venv/bin/python -r requirements-marker.txt
+# .env 中设置：WIKI_BACKEND_INGEST_ENABLE_MARKER_OCR=true
+```
+
+即使启用 Marker，超时、错误、没有 Markdown 或输出质量不合格时仍会自动回退 RapidOCR。依赖更新后应先在 DGX ARM64 上重新安装和验证，再重启长期运行进程。
 
 ### 使用 systemd 后台运行
 

@@ -52,6 +52,10 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias="WIKI_BACKEND_INGEST_LLM_MAX_TOKENS",
     )
+    ingest_enable_marker_ocr: bool = Field(
+        default=False,
+        validation_alias="WIKI_BACKEND_INGEST_ENABLE_MARKER_OCR",
+    )
     scheduled_ingest_root: Path | None = Field(
         default=None,
         validation_alias="WIKI_BACKEND_SCHEDULED_INGEST_ROOT",

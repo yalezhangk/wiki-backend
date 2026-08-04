@@ -71,6 +71,19 @@ class StartupDependencyTests(unittest.TestCase):
 
         self.assertEqual(settings.ingest_llm_max_tokens, 12288)
 
+    def test_marker_ocr_is_disabled_by_default_and_can_be_enabled(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            default_settings = Settings(_env_file=None)
+        with patch.dict(
+            "os.environ",
+            {"WIKI_BACKEND_INGEST_ENABLE_MARKER_OCR": "true"},
+            clear=True,
+        ):
+            enabled_settings = Settings(_env_file=None)
+
+        self.assertFalse(default_settings.ingest_enable_marker_ocr)
+        self.assertTrue(enabled_settings.ingest_enable_marker_ocr)
+
     def test_query_llm_token_limits_use_environment_values(self) -> None:
         with patch.dict(
             "os.environ",

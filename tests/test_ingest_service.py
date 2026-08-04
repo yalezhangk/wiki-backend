@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import UploadFile
@@ -14,6 +15,7 @@ from app.llm_config import LLMConfigError, LLMResponseTruncatedError
 from app.schemas.ingest import IngestJobResponse, IngestValidation
 from app.services.ingest_service import (
     IngestConflictError,
+    IngestContentQualityError,
     IngestLLMInvalidJSONError,
     IngestLLMResponseTruncatedError,
     IngestService,
@@ -269,7 +271,7 @@ class IngestServiceTests(unittest.TestCase):
         source_path.parent.mkdir(parents=True)
         source_path.write_text("pdf", encoding="utf-8")
         retry_payload = (
-            '{"title":"Report","slug":"report","source_page":"# Report",'
+            '{"ingest_status":"succeeded","ingest_error":null,"title":"Report","slug":"report","source_page":"# Report",'
             '"index_entry":"- [Report](sources/report.md) - summary",'
             '"overview_update":null,"entity_pages":[],"concept_pages":[],'
             '"contradictions":[],"log_entry":"## log"}'
@@ -413,6 +415,140 @@ class IngestServiceTests(unittest.TestCase):
             (upload_path.parent / f"{upload_path.stem}.{job.job_id}.schema.llm-response.txt").exists()
         )
 
+    def test_llm_reported_failure_does_not_write_wiki_or_mark_job_succeeded(self) -> None:
+        upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
+        job = asyncio.run(self.service.create_job(file=upload))
+        self.service._call_llm_main = lambda prompt, max_tokens=None: (  # type: ignore[method-assign]
+            '{"ingest_status":"failed","ingest_error":"source contains no usable text"}'
+        )
+
+        self.service._run_job(job.job_id)
+
+        failed = self.storage.jobs[job.job_id]
+        self.assertEqual(failed.status, "failed")
+        self.assertTrue(failed.error.startswith("llm_ingest_failed:"))
+        self.assertNotIn(job.job_id, self.storage.succeeded)
+        self.assertFalse((self.agent_root / "wiki" / "sources" / "report.md").exists())
+        self.assertNotIn(("writing_wiki", 65), self.storage.progress_updates)
+
+    def test_low_quality_pdf_conversion_does_not_call_llm_or_write_wiki(self) -> None:
+        upload = UploadFile(filename="report.pdf", file=io.BytesIO(b"%PDF-1.7"))
+        job = asyncio.run(self.service.create_job(file=upload))
+        converted = self.agent_root / "raw" / "uploads" / "converted.md"
+        converted.write_text("◇" * 100, encoding="utf-8")
+
+        def unexpected_llm_call(prompt: str, max_tokens: int | None = None) -> str:
+            raise AssertionError("低质量转换结果不应发送给 LLM")
+
+        self.service._call_llm_main = unexpected_llm_call  # type: ignore[method-assign]
+        with patch.object(
+            self.service,
+            "_extract_pdf_page_texts",
+            return_value=["This PDF has selectable text before conversion."],
+        ), patch.object(
+            self.service,
+            "_convert_to_markdown",
+            return_value=converted,
+        ), patch.object(
+            self.service,
+            "_convert_pdf_with_marker",
+            return_value=converted,
+        ) as marker_converter:
+            self.service._run_job(job.job_id)
+
+        marker_converter.assert_called_once_with(self.agent_root / job.source_path)
+        failed = self.storage.jobs[job.job_id]
+        self.assertEqual(failed.status, "failed")
+        self.assertTrue(failed.error.startswith("ocr_failed:"))
+        self.assertEqual(self.storage.progress_updates, [("converting", 10)])
+        self.assertFalse((self.agent_root / "wiki" / "sources" / "report.md").exists())
+
+    def test_scanned_pdf_attempts_ocr_before_calling_llm(self) -> None:
+        upload = UploadFile(filename="scan.pdf", file=io.BytesIO(b"%PDF-1.7"))
+        job = asyncio.run(self.service.create_job(file=upload))
+        converted = self.agent_root / "raw" / "uploads" / "scan.md"
+        converted.write_text("# Scan\n\nOCR extracted useful whitepaper text.", encoding="utf-8")
+        llm_payload = (
+            '{"ingest_status":"succeeded","ingest_error":null,"title":"Scan","slug":"scan",'
+            '"source_page":"# Scan","index_entry":"- [Scan](sources/scan.md) - summary",'
+            '"overview_update":null,"entity_pages":[],"concept_pages":[],'
+            '"contradictions":[],"log_entry":"## log"}'
+        )
+        self.service._call_llm_main = lambda prompt, max_tokens=None: llm_payload  # type: ignore[method-assign]
+
+        with patch.object(self.service, "_extract_pdf_page_texts", return_value=["", " "]), patch.object(
+            self.service,
+            "_convert_pdf_with_marker",
+            return_value=converted,
+        ) as marker_converter:
+            self.service._run_job(job.job_id)
+
+        marker_converter.assert_called_once_with(self.agent_root / job.source_path)
+        completed = self.storage.jobs[job.job_id]
+        self.assertEqual(completed.status, "succeeded")
+        self.assertTrue((self.agent_root / "wiki" / "sources" / "scan.md").exists())
+
+    def test_scanned_pdf_fails_without_calling_llm_when_ocr_is_unavailable(self) -> None:
+        upload = UploadFile(filename="scan.pdf", file=io.BytesIO(b"%PDF-1.7"))
+        job = asyncio.run(self.service.create_job(file=upload))
+
+        def unexpected_llm_call(prompt: str, max_tokens: int | None = None) -> str:
+            raise AssertionError("OCR 不可用时不应调用 LLM")
+
+        self.service._call_llm_main = unexpected_llm_call  # type: ignore[method-assign]
+        with patch.object(self.service, "_extract_pdf_page_texts", return_value=["", " "]), patch.object(
+            self.service,
+            "_convert_pdf_with_marker",
+            side_effect=IngestContentQualityError(
+                "ocr_unavailable",
+                "扫描 PDF 需要 RapidOCR，但服务未安装 rapidocr 或 onnxruntime。",
+            ),
+        ):
+            self.service._run_job(job.job_id)
+
+        failed = self.storage.jobs[job.job_id]
+        self.assertEqual(failed.status, "failed")
+        self.assertTrue(failed.error.startswith("ocr_unavailable:"))
+        self.assertEqual(self.storage.progress_updates, [("converting", 10)])
+        self.assertFalse((self.agent_root / "wiki" / "sources" / "scan.md").exists())
+
+    def test_default_pdf_ocr_uses_rapidocr_without_starting_marker(self) -> None:
+        source = self.agent_root / "raw" / "uploads" / "scan.pdf"
+        converted = self.agent_root / "raw" / "uploads" / "scan.md"
+
+        with patch("app.services.ingest_service.settings.ingest_enable_marker_ocr", False), patch(
+            "app.services.ingest_service.shutil.which"
+        ) as marker_command, patch.object(
+            self.service,
+            "_convert_pdf_with_rapidocr",
+            return_value=converted,
+        ) as rapidocr_converter:
+            result = self.service._convert_pdf_with_marker(source)
+
+        self.assertEqual(result, converted)
+        rapidocr_converter.assert_called_once_with(source)
+        marker_command.assert_not_called()
+
+    def test_enabled_marker_without_markdown_falls_back_to_rapidocr(self) -> None:
+        source = self.agent_root / "raw" / "uploads" / "scan.pdf"
+        converted = self.agent_root / "raw" / "uploads" / "scan.md"
+
+        with patch("app.services.ingest_service.settings.ingest_enable_marker_ocr", True), patch(
+            "app.services.ingest_service.shutil.which",
+            return_value="marker_single",
+        ), patch(
+            "app.services.ingest_service.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stderr=""),
+        ), patch.object(
+            self.service,
+            "_convert_pdf_with_rapidocr",
+            return_value=converted,
+        ) as rapidocr_converter:
+            result = self.service._convert_pdf_with_marker(source)
+
+        self.assertEqual(result, converted)
+        rapidocr_converter.assert_called_once_with(source)
+
     def test_build_prompt_allows_conditional_overview_update(self) -> None:
         source = self.agent_root / "raw" / "uploads" / "report.md"
         source.parent.mkdir(parents=True)
@@ -423,6 +559,8 @@ class IngestServiceTests(unittest.TestCase):
         self.assertIn("LLM Wiki Agent — Schema & Workflow Instructions", prompt)
         self.assertIn("full updated content for wiki/overview.md", prompt)
         self.assertIn("otherwise return `null`", prompt)
+        self.assertIn('"ingest_status": "succeeded"', prompt)
+        self.assertIn('"ingest_status": "failed"', prompt)
 
     def test_build_wiki_context_keeps_complete_index_overview_and_recent_source(self) -> None:
         index_path = self.agent_root / "wiki" / "index.md"
@@ -447,7 +585,7 @@ class IngestServiceTests(unittest.TestCase):
         upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
         job = asyncio.run(self.service.create_job(file=upload))
         llm_payload = (
-            '{"title":"Report","slug":"report","source_page":"# Report",'
+            '{"ingest_status":"succeeded","ingest_error":null,"title":"Report","slug":"report","source_page":"# Report",'
             '"index_entry":"- [Report](sources/report.md) - summary",'
             '"overview_update":null,"entity_pages":[],"concept_pages":[],'
             '"contradictions":[],"log_entry":"## log"}'
@@ -473,19 +611,24 @@ class IngestServiceTests(unittest.TestCase):
         upload = UploadFile(filename="report.pdf", file=io.BytesIO(b"%PDF-1.7"))
         job = asyncio.run(self.service.create_job(file=upload))
         converted = self.agent_root / "raw" / "uploads" / "converted.md"
-        converted.write_text("# Report", encoding="utf-8")
+        converted.write_text("# Report\n\nConverted PDF content is long enough for extraction.", encoding="utf-8")
         llm_payload = (
-            '{"title":"Report","slug":"report","source_page":"# Report",'
+            '{"ingest_status":"succeeded","ingest_error":null,"title":"Report","slug":"report","source_page":"# Report",'
             '"index_entry":"- [Report](sources/report.md) - summary",'
             '"overview_update":null,"entity_pages":[],"concept_pages":[],'
             '"contradictions":[],"log_entry":"## log"}'
         )
         self.service._call_llm_main = lambda prompt, max_tokens=None: llm_payload  # type: ignore[method-assign]
 
-        with patch.object(self.service, "_convert_to_markdown", return_value=converted):
+        with patch.object(
+            self.service,
+            "_extract_pdf_page_texts",
+            return_value=["This PDF has selectable text before conversion."],
+        ), patch.object(self.service, "_convert_to_markdown", return_value=converted):
             self.service._run_job(job.job_id)
 
         self.assertEqual(self.storage.progress_updates[0], ("converting", 10))
+        self.assertEqual(self.storage.jobs[job.job_id].status, "succeeded")
 
     def test_ingest_classifies_created_and_updated_pages_from_prewrite_state(self) -> None:
         existing_entity = self.agent_root / "wiki" / "entities" / "Existing.md"
@@ -494,7 +637,7 @@ class IngestServiceTests(unittest.TestCase):
         upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
         job = asyncio.run(self.service.create_job(file=upload))
         llm_payload = (
-            '{"title":"Report","slug":"report","source_page":"# Report",'
+            '{"ingest_status":"succeeded","ingest_error":null,"title":"Report","slug":"report","source_page":"# Report",'
             '"index_entry":"- [Report](sources/report.md) - summary",'
             '"overview_update":null,'
             '"entity_pages":[{"path":"entities/Existing.md","content":"# New"}],'
@@ -518,7 +661,7 @@ class IngestServiceTests(unittest.TestCase):
         upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
         job = asyncio.run(self.service.create_job(file=upload))
         llm_payload = (
-            '{"title":"Report","slug":"report","source_page":"# Report",'
+            '{"ingest_status":"succeeded","ingest_error":null,"title":"Report","slug":"report","source_page":"# Report",'
             '"index_entry":"- [Report](sources/report.md) - summary",'
             '"overview_update":"# New Overview","entity_pages":[],"concept_pages":[],'
             '"contradictions":[],"log_entry":"## log"}'
@@ -628,7 +771,7 @@ class IngestServiceTests(unittest.TestCase):
         upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
         job = asyncio.run(self.service.create_job(file=upload))
         llm_payload = (
-            '{"title":"Report","slug":"report","source_page":"# Report",'
+            '{"ingest_status":"succeeded","ingest_error":null,"title":"Report","slug":"report","source_page":"# Report",'
             '"index_entry":"- [Report](sources/report.md) - summary",'
             '"overview_update":null,"entity_pages":[],"concept_pages":[],'
             '"contradictions":[],"log_entry":"## log"}'

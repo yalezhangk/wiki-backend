@@ -13,6 +13,7 @@ from app.schemas.chat import (
     ChatTurnResponse,
 )
 from app.services.chat_service import ChatService, ChatValidationError
+from app.model_profiles import ModelProfileDisabledError, ModelProfileUnavailableError
 from app.services.chat_turn_service import ChatTurnService
 from app.services.query_service import QueryServiceError
 from app.storage.mysql import ChatNotFoundError, StorageError, StorageUnavailableError
@@ -147,11 +148,19 @@ def send_message(
 ) -> ChatTurnResponse:
     """执行一轮有状态聊天，并持久化本轮消息。"""
     try:
-        return chat_turn_service.run_turn(chat_id=chat_id, content=payload.content)
+        return chat_turn_service.run_turn(
+            chat_id=chat_id,
+            content=payload.content,
+            model_profile_id=payload.model_profile_id,
+        )
     except ChatNotFoundError as exc:
         raise HTTPException(status_code=404, detail="chat not found") from exc
     except ChatValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ModelProfileDisabledError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ModelProfileUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except QueryServiceError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except StorageUnavailableError as exc:

@@ -86,11 +86,19 @@ WIKI_BACKEND_CHAT_HISTORY_LIMIT=6
 WIKI_BACKEND_LLM_PROVIDER=deepseek
 WIKI_BACKEND_LLM_FAST_MODEL=deepseek-v4-flash
 WIKI_BACKEND_LLM_MAIN_MODEL=deepseek-v4-pro
-WIKI_BACKEND_LLM_API_KEY=
-WIKI_BACKEND_LLM_API_BASE=
+WIKI_BACKEND_DEEPSEEK_API_KEY=
+WIKI_BACKEND_DEEPSEEK_API_BASE=https://api.deepseek.com
+WIKI_BACKEND_OLLAMA_API_BASE=http://127.0.0.1:11434
+WIKI_BACKEND_MODEL_PROFILE_DEFAULT_ID=deepseek-v4-flash
+WIKI_BACKEND_MODEL_PROFILE_ENABLED_IDS=deepseek-v4-pro,deepseek-v4-flash,local-qwen3.6-35b-direct,local-qwen3.6-35b-thinking
 ```
 
 `WIKI_AGENT_REPO_PATH` 只表示共享知识库数据所在的 agent 仓库根目录，不允许再用于 `sys.path` 或动态 Python 导入。
+
+聊天模型档案的模型名、推理策略、token 和温度由服务端白名单固定；只允许通过逗号分隔的
+`WIKI_BACKEND_MODEL_PROFILE_ENABLED_IDS` 控制是否公开。旧 `WIKI_BACKEND_LLM_API_KEY` 和
+`WIKI_BACKEND_LLM_API_BASE` 仅用于兼容已有 `.env`，新配置分别使用 `WIKI_BACKEND_DEEPSEEK_API_KEY`
+和 `WIKI_BACKEND_OLLAMA_API_BASE`，不得让 DeepSeek 继承旧的 Ollama 地址。
 
 真实 `.env` 不提交。新增配置时必须：
 

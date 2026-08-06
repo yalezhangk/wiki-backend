@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable, Sequence, cast
 
 from app.config import settings
-from app.llm_config import call_llm_fast, call_llm_main
+from app.llm_config import LLMProfile, call_llm_fast, call_llm_main, call_llm_profile
 from app.prompts import load_prompt, render_prompt
 from app.schemas.chat import ChatMessageResponse
 from app.schemas.query import CitationKind, CitationResponse, QueryResult
@@ -29,6 +29,10 @@ DIRECTORY_KINDS = {
     "concepts": "concept",
     "syntheses": "synthesis",
 }
+MAX_MODEL_SELECTED_PAGES = 10
+PAGE_SELECTION_HISTORY_MESSAGE_LIMIT = 4
+PAGE_SELECTION_HISTORY_MAX_CHARS = 1200
+PAGE_SELECTION_HISTORY_MESSAGE_MAX_CHARS = 300
 
 
 class QueryServiceError(RuntimeError):
@@ -119,11 +123,21 @@ class QueryService:
     def run(self, question: str) -> QueryResult:
         return self._run(question=question, history_messages=[], use_wiki_links=False)
 
-    def run_chat_turn(self, question: str, history_messages: Sequence[ChatMessageResponse]) -> QueryResult:
+    def run_chat_turn(
+        self,
+        question: str,
+        history_messages: Sequence[ChatMessageResponse],
+        model_profile: LLMProfile | None = None,
+    ) -> QueryResult:
+        kwargs = {
+            "question": question,
+            "history_messages": list(history_messages)[-6:],
+            "use_wiki_links": True,
+        }
+        if model_profile is not None:
+            kwargs["answer_model_profile"] = model_profile
         return self._run(
-            question=question,
-            history_messages=list(history_messages)[-6:],
-            use_wiki_links=True,
+            **kwargs,
         )
 
     def _run(
@@ -131,6 +145,7 @@ class QueryService:
         question: str,
         history_messages: Sequence[ChatMessageResponse],
         use_wiki_links: bool,
+        answer_model_profile: LLMProfile | None = None,
     ) -> QueryResult:
         normalized_question = question.strip()
         if not normalized_question:
@@ -140,7 +155,11 @@ class QueryService:
         if not index_content:
             raise QueryServiceError("Wiki is empty. Ingest some sources first before querying.")
 
-        relevant_pages = self._select_relevant_pages(normalized_question, index_content)
+        relevant_pages = self._select_relevant_pages(
+            normalized_question,
+            index_content,
+            history_messages=history_messages,
+        )
         pages_context = self._build_pages_context(relevant_pages, index_content)
         sources = self._build_stable_sources(relevant_pages)
         citations = self._build_citations(sources=sources, relevant_pages=relevant_pages)
@@ -155,16 +174,54 @@ class QueryService:
         )
         _, call_llm_main = self._get_llm_callers()
 
-        LOGGER.info("Running wiki query question=%r relevant_pages=%d", normalized_question, len(relevant_pages))
+        answer_model = answer_model_profile or LLMProfile(
+            provider=settings.llm_provider,
+            model=settings.llm_main_model,
+            api_key=None,
+            api_base=None,
+            max_tokens=settings.llm_main_max_tokens,
+            temperature=settings.llm_main_temperature,
+        )
+        model_role = "chat_profile" if answer_model_profile is not None else "internal_main"
+        answer_started_at = time.monotonic()
+        LOGGER.info(
+            "Wiki answer generation started model_role=%s provider=%s model=%s "
+            "reasoning_effort=%s relevant_pages=%s history_messages=%s",
+            model_role,
+            answer_model.provider,
+            answer_model.model,
+            answer_model.reasoning_effort or "provider_default",
+            len(relevant_pages),
+            len(history_messages),
+        )
 
         try:
-            answer = self._call_llm_with_retry(
-                call_llm_main,
-                prompt,
-                max_tokens=settings.llm_main_max_tokens,
-                operation="answer generation",
-            )
+            if answer_model_profile is None:
+                answer = self._call_llm_with_retry(
+                    call_llm_main,
+                    prompt,
+                    max_tokens=settings.llm_main_max_tokens,
+                    operation="answer generation",
+                )
+            else:
+                answer = self._call_llm_with_retry(
+                    lambda request_prompt, max_tokens: call_llm_profile(
+                        request_prompt,
+                        answer_model_profile,
+                        max_tokens=max_tokens,
+                    ),
+                    prompt,
+                    max_tokens=answer_model_profile.max_tokens,
+                    operation="answer generation",
+                )
         except Exception as exc:
+            LOGGER.exception(
+                "Wiki answer generation failed model_role=%s provider=%s model=%s elapsed_ms=%s",
+                model_role,
+                answer_model.provider,
+                answer_model.model,
+                round((time.monotonic() - answer_started_at) * 1000),
+            )
             raise QueryServiceError("Failed to generate query answer via backend LLM config.") from exc
 
         normalized_answer = self._normalize_answer(answer, source_count=len(sources))
@@ -176,6 +233,19 @@ class QueryService:
         if not normalized_answer:
             raise QueryServiceError("LLM returned an empty answer")
 
+        LOGGER.info(
+            "Wiki answer generation completed model_role=%s provider=%s model=%s "
+            "reasoning_effort=%s elapsed_ms=%s answer_chars=%s relevant_pages=%s citations=%s",
+            model_role,
+            answer_model.provider,
+            answer_model.model,
+            answer_model.reasoning_effort or "provider_default",
+            round((time.monotonic() - answer_started_at) * 1000),
+            len(normalized_answer),
+            len(relevant_pages),
+            len(citations),
+        )
+
         return QueryResult(
             answer=normalized_answer,
             sources=sources,
@@ -183,16 +253,39 @@ class QueryService:
             citations=citations,
         )
 
-    def _select_relevant_pages(self, question: str, index_content: str) -> list[Path]:
+    def _select_relevant_pages(
+        self,
+        question: str,
+        index_content: str,
+        *,
+        history_messages: Sequence[ChatMessageResponse] = (),
+    ) -> list[Path]:
         relevant_pages = find_relevant_pages(question, index_content, self._wiki_dir, self._graph_json)
         if relevant_pages and len(relevant_pages) > 1:
+            LOGGER.info(
+                "Wiki page selection completed strategy=keyword_graph relevant_pages=%s",
+                len(relevant_pages),
+            )
             return relevant_pages
 
-        LOGGER.info("Falling back to model-based page selection")
+        selection_started_at = time.monotonic()
+        LOGGER.info(
+            "Wiki page selection started strategy=model_fallback model_role=internal_fast_selector "
+            "provider=%s model=%s reasoning_effort=provider_default",
+            settings.llm_provider,
+            settings.llm_fast_model,
+        )
         call_llm_fast, _ = self._get_llm_callers()
+        history_context = self._build_page_selection_history(history_messages)
+        history_section = (
+            f"\n\nRecent conversation context (use only to resolve references):\n{history_context}"
+            if history_context != "(none)"
+            else ""
+        )
         prompt = (
             "Given this wiki index:\n\n"
             f"{index_content}\n\n"
+            f"{history_section}\n\n"
             f'Which pages are most relevant to answering: "{question}"\n\n'
             'Return ONLY a JSON array of relative file paths (as listed in the index), '
             'e.g. ["sources/foo.md", "concepts/Bar.md"]. Maximum 10 pages.'
@@ -205,11 +298,21 @@ class QueryService:
                 operation="page selection",
             )
         except Exception:
-            LOGGER.warning("Model page selection failed", exc_info=True)
+            LOGGER.warning(
+                "Wiki page selection failed strategy=model_fallback model_role=internal_fast_selector "
+                "elapsed_ms=%s",
+                round((time.monotonic() - selection_started_at) * 1000),
+                exc_info=True,
+            )
             return relevant_pages
 
         parsed_paths = self._parse_json_array(raw)
         if parsed_paths is None:
+            LOGGER.warning(
+                "Wiki page selection returned invalid response strategy=model_fallback "
+                "model_role=internal_fast_selector elapsed_ms=%s",
+                round((time.monotonic() - selection_started_at) * 1000),
+            )
             return relevant_pages
 
         selected_pages: list[Path] = []
@@ -219,8 +322,17 @@ class QueryService:
             candidate = self._resolve_wiki_page(path_text)
             if candidate is not None and candidate not in selected_pages:
                 selected_pages.append(candidate)
+                if len(selected_pages) == MAX_MODEL_SELECTED_PAGES:
+                    break
 
-        return selected_pages or relevant_pages
+        final_pages = selected_pages or relevant_pages
+        LOGGER.info(
+            "Wiki page selection completed strategy=model_fallback model_role=internal_fast_selector "
+            "elapsed_ms=%s selected_pages=%s",
+            round((time.monotonic() - selection_started_at) * 1000),
+            len(final_pages),
+        )
+        return final_pages
 
     def _resolve_wiki_page(self, value: str) -> Path | None:
         candidate = resolve_wiki_page(self._wiki_dir, value)
@@ -392,6 +504,34 @@ class QueryService:
             role_label = "User" if message.role == "user" else "Assistant"
             lines.append(f"{role_label}: {message.content}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_page_selection_history(history_messages: Sequence[ChatMessageResponse]) -> str:
+        """构造有长度上限的追问上下文，避免检索阶段重复携带完整聊天记录。"""
+        if not history_messages:
+            return "(none)"
+
+        remaining_chars = PAGE_SELECTION_HISTORY_MAX_CHARS
+        lines: list[str] = []
+        for message in history_messages[-PAGE_SELECTION_HISTORY_MESSAGE_LIMIT:]:
+            role_label = "User" if message.role == "user" else "Assistant"
+            normalized_content = " ".join(message.content.split())
+            prefix = f"{role_label}: "
+            available_chars = min(
+                PAGE_SELECTION_HISTORY_MESSAGE_MAX_CHARS,
+                remaining_chars - len(prefix),
+            )
+            if available_chars <= 0:
+                break
+            content = normalized_content[:available_chars]
+            if len(normalized_content) > available_chars:
+                content = content.rstrip() + "…"
+            line = f"{prefix}{content}"
+            lines.append(line)
+            remaining_chars -= len(line) + 1
+            if remaining_chars <= 0:
+                break
+        return "\n".join(lines) or "(none)"
 
     @staticmethod
     def _build_answer_prompt(

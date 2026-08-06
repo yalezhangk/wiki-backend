@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from app.schemas.model_profile import ModelProfileId
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -114,11 +117,11 @@ class Settings(BaseSettings):
         default="deepseek-v4-pro",
         validation_alias="WIKI_BACKEND_LLM_MAIN_MODEL",
     )
-    llm_api_key: str | None = Field(
+    legacy_llm_api_key: str | None = Field(
         default=None,
         validation_alias="WIKI_BACKEND_LLM_API_KEY",
     )
-    llm_api_base: str | None = Field(
+    legacy_llm_api_base: str | None = Field(
         default=None,
         validation_alias="WIKI_BACKEND_LLM_API_BASE",
     )
@@ -144,6 +147,56 @@ class Settings(BaseSettings):
         le=2.0,
         validation_alias="WIKI_BACKEND_LLM_MAIN_TEMPERATURE",
     )
+    deepseek_api_key: str | None = Field(
+        default=None,
+        validation_alias="WIKI_BACKEND_DEEPSEEK_API_KEY",
+    )
+    deepseek_api_base: str = Field(
+        default="https://api.deepseek.com",
+        validation_alias="WIKI_BACKEND_DEEPSEEK_API_BASE",
+    )
+    ollama_api_base: str | None = Field(
+        default=None,
+        validation_alias="WIKI_BACKEND_OLLAMA_API_BASE",
+    )
+    model_profile_default_id: ModelProfileId = Field(
+        default="deepseek-v4-flash",
+        validation_alias="WIKI_BACKEND_MODEL_PROFILE_DEFAULT_ID",
+    )
+    model_profile_enabled_ids: Annotated[tuple[ModelProfileId, ...], NoDecode] = Field(
+        default=(
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "local-qwen3.6-35b-direct",
+            "local-qwen3.6-35b-thinking",
+        ),
+        validation_alias="WIKI_BACKEND_MODEL_PROFILE_ENABLED_IDS",
+    )
+
+    @field_validator("model_profile_enabled_ids", mode="before")
+    @classmethod
+    def parse_model_profile_enabled_ids(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(item.strip() for item in value.split(",") if item.strip())
+        return value
+
+    @field_validator("model_profile_enabled_ids")
+    @classmethod
+    def validate_unique_model_profile_ids(
+        cls,
+        value: tuple[ModelProfileId, ...],
+    ) -> tuple[ModelProfileId, ...]:
+        if not value:
+            raise ValueError("WIKI_BACKEND_MODEL_PROFILE_ENABLED_IDS cannot be empty")
+        if len(set(value)) != len(value):
+            raise ValueError("WIKI_BACKEND_MODEL_PROFILE_ENABLED_IDS cannot contain duplicates")
+        return value
+
+    @model_validator(mode="after")
+    def validate_default_model_profile_is_enabled(self) -> Settings:
+        if self.model_profile_default_id not in self.model_profile_enabled_ids:
+            raise ValueError("WIKI_BACKEND_MODEL_PROFILE_DEFAULT_ID must be enabled")
+        return self
 
 
 settings = Settings()

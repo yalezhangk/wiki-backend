@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 import tempfile
 from datetime import datetime, timezone
@@ -103,7 +104,7 @@ class QueryServiceTests(unittest.TestCase):
                 encoding="utf-8",
             )
             service = QueryService(root)
-            service._select_relevant_pages = lambda question, index: [page]  # type: ignore[method-assign]
+            service._select_relevant_pages = lambda question, index, **kwargs: [page]  # type: ignore[method-assign]
             service._call_llm_fast = lambda prompt, max_tokens=None: "[]"
             service._call_llm_main = lambda prompt, max_tokens=None: "MDC4 是智能监控单元。[1]"
 
@@ -120,6 +121,7 @@ class QueryServiceTests(unittest.TestCase):
             question: str,
             history_messages: list[ChatMessageResponse],
             use_wiki_links: bool,
+            **kwargs: object,
         ) -> QueryResult:
             self.assertTrue(use_wiki_links)
             captured_history.extend(history_messages)
@@ -271,7 +273,7 @@ class QueryServiceTests(unittest.TestCase):
             )
             second = entities / "Second.md"
             first = entities / "First.md"
-            service._select_relevant_pages = lambda question, index: [second, first, second]  # type: ignore[method-assign]
+            service._select_relevant_pages = lambda question, index, **kwargs: [second, first, second]  # type: ignore[method-assign]
 
             result = service.run("question")
 
@@ -290,7 +292,7 @@ class QueryServiceTests(unittest.TestCase):
             (wiki / "index.md").write_text("# Index", encoding="utf-8")
             service = QueryService(root)
             observed_max_tokens: list[int | None] = []
-            service._select_relevant_pages = lambda question, index: []  # type: ignore[method-assign]
+            service._select_relevant_pages = lambda question, index, **kwargs: []  # type: ignore[method-assign]
             service._call_llm_fast = lambda prompt, max_tokens=None: "[]"  # type: ignore[method-assign]
             service._call_llm_main = lambda prompt, max_tokens=None: (  # type: ignore[method-assign]
                 observed_max_tokens.append(max_tokens) or "answer"
@@ -317,6 +319,54 @@ class QueryServiceTests(unittest.TestCase):
                 service._select_relevant_pages("question", "# Index")
 
         self.assertEqual(observed_max_tokens, [768])
+
+    def test_model_page_selection_caps_valid_deduplicated_pages_at_ten(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wiki = root / "wiki"
+            sources = wiki / "sources"
+            sources.mkdir(parents=True)
+            paths = [f"sources/Page-{index}.md" for index in range(12)]
+            for relative_path in paths:
+                (wiki / relative_path).write_text("# Page", encoding="utf-8")
+
+            service = QueryService(root)
+            service._call_llm_fast = lambda prompt, max_tokens=None: json.dumps(
+                ["sources/missing.md", paths[0], paths[0], *paths[1:]]
+            )  # type: ignore[method-assign]
+            service._call_llm_main = lambda prompt, max_tokens=None: "answer"  # type: ignore[method-assign]
+
+            selected_pages = service._select_relevant_pages("unmatched question", "# Index")
+
+        self.assertEqual(
+            [page.relative_to(wiki).as_posix() for page in selected_pages],
+            paths[:10],
+        )
+
+    def test_page_selection_prompt_includes_compact_recent_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wiki = root / "wiki"
+            wiki.mkdir()
+            service = QueryService(root)
+            prompts: list[str] = []
+            service._call_llm_fast = lambda prompt, max_tokens=None: prompts.append(prompt) or "[]"  # type: ignore[method-assign]
+            service._call_llm_main = lambda prompt, max_tokens=None: "answer"  # type: ignore[method-assign]
+            history = [
+                self._message(1, "请介绍 MDC4"),
+                self._message(2, "MDC4 是智能监控单元"),
+                self._message(3, "它和 DNF7 有什么区别？"),
+                self._message(4, "两者用于不同的监控场景"),
+                self._message(5, "那它的安装要求呢？"),
+            ]
+
+            service._select_relevant_pages("它呢？", "# Index", history_messages=history)
+
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("Recent conversation context", prompts[0])
+        self.assertIn("MDC4 是智能监控单元", prompts[0])
+        self.assertIn("那它的安装要求呢？", prompts[0])
+        self.assertNotIn("请介绍 MDC4", prompts[0])
 
     def test_resolve_wiki_page_rejects_absolute_and_parent_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

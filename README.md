@@ -32,6 +32,9 @@ ECS Nginx :8080
 ## API
 
 - `GET /api/health`：进程存活检查，不验证 MySQL 或 LLM。
+- `GET /api/model-profiles`：返回可公开的已启用回答模型档案和缓存的可用状态；不返回凭据、模型服务地址或未启用档案。
+- `GET /api/model-profiles/overview`：返回系统设置使用的 Chat 已启用档案，以及当前 `FAST_MODEL`、`MAIN_MODEL` 的 provider 和模型名；不返回凭据或服务地址。
+- `POST /api/chats/{chat_id}/messages`：请求体除 `content` 外必须带受控白名单中的 `model_profile_id`；不可用档案返回 `503`，不会先写入用户消息。
 - `POST /api/query`：无状态单轮知识库问答。
 - `GET /api/chats`：列出会话。
 - `POST /api/chats`：创建会话。
@@ -142,35 +145,15 @@ Ingest 响应在保留 `status` 的同时提供 `stage`、`progress_percent` 和
 
 ## 配置
 
-复制 `.env.example` 的配置项到仅在服务器维护的 `.env`：
-
-```env
-WIKI_AGENT_REPO_PATH=../llm-wiki-agent
-WIKI_BACKEND_MYSQL_HOST=127.0.0.1
-WIKI_BACKEND_MYSQL_PORT=3306
-WIKI_BACKEND_MYSQL_USER=wiki_backend_app
-WIKI_BACKEND_MYSQL_PASSWORD=replace-with-a-strong-password
-WIKI_BACKEND_MYSQL_DATABASE=wiki_backend
-WIKI_BACKEND_DEFAULT_CHAT_TITLE=新对话
-WIKI_BACKEND_CHAT_HISTORY_LIMIT=6
-WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES=10485760
-WIKI_BACKEND_INGEST_LLM_MAX_TOKENS=8192
-WIKI_BACKEND_INGEST_ENABLE_MARKER_OCR=false
-# 仅在启用 DGX 定时 Markdown 同步时配置；不要提交真实目录。
-WIKI_BACKEND_SCHEDULED_INGEST_ROOT=/path/to/source-directory
-WIKI_BACKEND_SCHEDULED_INGEST_API_URL=http://127.0.0.1:8081
-WIKI_BACKEND_SCHEDULED_INGEST_POLL_SECONDS=2
-WIKI_BACKEND_SCHEDULED_INGEST_POLL_TIMEOUT_SECONDS=7200
-WIKI_BACKEND_LLM_PROVIDER=deepseek
-WIKI_BACKEND_LLM_FAST_MODEL=deepseek-v4-flash
-WIKI_BACKEND_LLM_MAIN_MODEL=deepseek-v4-pro
-WIKI_BACKEND_LLM_API_KEY=
-WIKI_BACKEND_LLM_API_BASE=
-```
+复制 `.env.example` 到仅在服务器维护的 `.env`。模板中的每个配置项均有中文注释；未按部署需要调整的项可保留默认值。
 
 真实 `.env` 不提交 Git。DGX 上使用 Linux 路径，不要写入 Windows 反斜杠路径。模型密钥只写入服务器 `.env`；不要把 `llm-wiki-agent/tools/llm_config.py` 中的本地配置或密钥复制到本项目。
 
-LLM 只使用一套连接配置：`WIKI_BACKEND_LLM_PROVIDER`、`WIKI_BACKEND_LLM_API_KEY` 和 `WIKI_BACKEND_LLM_API_BASE`。`FAST_MODEL` 仅用于页面选择、图关系推断等轻量任务，`MAIN_MODEL` 用于问答与 ingest；两者始终走同一个模型服务。对 `ollama` 或 `ollama_chat`，后端不会发送 API key。
+内部任务由 `WIKI_BACKEND_LLM_PROVIDER`、`WIKI_BACKEND_LLM_FAST_MODEL` 和 `WIKI_BACKEND_LLM_MAIN_MODEL` 控制：`FAST_MODEL` 用于页面选择、图关系推断等轻量任务，`MAIN_MODEL` 用于无状态问答、ingest 和巡检。模型兜底页面选择在安全校验、去重后最多保留 10 个页面。DeepSeek 连接统一使用 `WIKI_BACKEND_DEEPSEEK_API_KEY` 与 `WIKI_BACKEND_DEEPSEEK_API_BASE`；Ollama 统一使用 `WIKI_BACKEND_OLLAMA_API_BASE`，且不会发送 API key。
+
+聊天回答档案固定为 `deepseek-v4-pro`、`deepseek-v4-flash`、`local-qwen3.6-35b-direct` 和 `local-qwen3.6-35b-thinking`。`.env` 仅用 `WIKI_BACKEND_MODEL_PROFILE_DEFAULT_ID` 指定默认项，并用逗号分隔的 `WIKI_BACKEND_MODEL_PROFILE_ENABLED_IDS` 控制公开项；模型名、推理策略、token 和温度由后端白名单固定。每轮聊天只接受 `model_profile_id`，不会接受浏览器传来的 provider、模型名、`api_base`、密钥或任意 LiteLLM 参数。Qwen 固定使用 `ollama_chat/qwen3.6:35b`：direct 通过 `reasoning_effort="none"` 请求 `think=false`，thinking 通过 `reasoning_effort="low"` 请求 `think=true`；两者只保存最终回答，不保存 reasoning 原文。
+
+旧 `.env` 中的 `WIKI_BACKEND_LLM_API_KEY` 和 `WIKI_BACKEND_LLM_API_BASE` 仍会被读取以兼容已有部署：前者仅作为未迁移 DeepSeek Key 的回退，后者仅作为未迁移 Ollama 地址的回退。新配置不要再添加它们；应分别迁移为 `WIKI_BACKEND_DEEPSEEK_API_KEY` 和 `WIKI_BACKEND_OLLAMA_API_BASE`。DeepSeek 不会再继承旧的 Ollama 地址。
 
 ### 切换为 DGX 同机 Ollama
 
@@ -178,17 +161,16 @@ LiteLLM 使用 `ollama_chat` 时会请求 Ollama 的 `/api/chat`，因此与你�
 
 ```env
 WIKI_BACKEND_LLM_PROVIDER=ollama_chat
-WIKI_BACKEND_LLM_FAST_MODEL=qwen3.6:27b
-WIKI_BACKEND_LLM_MAIN_MODEL=qwen3.6:27b
-WIKI_BACKEND_LLM_API_KEY=
-WIKI_BACKEND_LLM_API_BASE=http://127.0.0.1:11434
+WIKI_BACKEND_LLM_FAST_MODEL=qwen3.6:35b
+WIKI_BACKEND_LLM_MAIN_MODEL=qwen3.6:35b
+WIKI_BACKEND_OLLAMA_API_BASE=http://127.0.0.1:11434
 WIKI_BACKEND_LLM_FAST_MAX_TOKENS=5120
 WIKI_BACKEND_LLM_MAIN_MAX_TOKENS=8192
 ```
 
 编辑 DGX 的私有 `.env` 后重启 `wiki-backend`；先以 `GET /api/health` 确认进程，再执行一次只读 `POST /api/query` 验证回答。不要把 Ollama `11434`、后端 `8081` 或真实 `.env` 暴露到公网。
 
-`WIKI_BACKEND_INGEST_LLM_MAX_TOKENS` 仅控制 Ingest 主模型的单次输出预算，默认保持兼容的 `16384`。提高该值前必须先确认所用模型支持对应上限；模型返回 `finish_reason=length` 时，任务会以可识别的截断错误失败，不会用相同 Prompt 盲目重试。
+`WIKI_BACKEND_INGEST_LLM_MAX_TOKENS` 仅控制 Ingest 主模型的单次输出预算，默认是 `8192`。提高该值前必须先确认所用模型支持对应上限；模型返回 `finish_reason=length` 时，任务会以可识别的截断错误失败，不会用相同 Prompt 盲目重试。
 
 ## MySQL 初始化
 

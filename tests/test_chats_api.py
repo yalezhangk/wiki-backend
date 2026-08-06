@@ -55,7 +55,7 @@ class FakeChatTurnService:
         self._chat_service = chat_service
         self.should_fail = False
 
-    def run_turn(self, chat_id: int, content: str):  # type: ignore[no-untyped-def]
+    def run_turn(self, chat_id: int, content: str, model_profile_id: str):  # type: ignore[no-untyped-def]
         if chat_id != self._chat_service.chat.id:
             raise ChatNotFoundError(chat_id)
         if self.should_fail:
@@ -165,7 +165,10 @@ class ChatsApiTests(unittest.TestCase):
         self.assertIsNone(response.json()["messages"][0]["synthesized_at"])
 
     def test_post_message_returns_turn_payload(self) -> None:
-        response = self.client.post("/api/chats/1/messages", json={"content": "hello"})
+        response = self.client.post(
+            "/api/chats/1/messages",
+            json={"content": "hello", "model_profile_id": "deepseek-v4-flash"},
+        )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -184,7 +187,10 @@ class ChatsApiTests(unittest.TestCase):
         )
 
     def test_post_message_returns_404_for_missing_chat(self) -> None:
-        response = self.client.post("/api/chats/2/messages", json={"content": "hello"})
+        response = self.client.post(
+            "/api/chats/2/messages",
+            json={"content": "hello", "model_profile_id": "deepseek-v4-flash"},
+        )
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "chat not found")
@@ -197,7 +203,10 @@ class ChatsApiTests(unittest.TestCase):
     def test_post_message_returns_502_for_query_failure(self) -> None:
         self.chat_turn_service.should_fail = True
 
-        response = self.client.post("/api/chats/1/messages", json={"content": "hello"})
+        response = self.client.post(
+            "/api/chats/1/messages",
+            json={"content": "hello", "model_profile_id": "deepseek-v4-flash"},
+        )
 
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.json()["detail"], "llm failed")
@@ -206,7 +215,10 @@ class ChatsApiTests(unittest.TestCase):
         self.chat_turn_service.should_fail = True
 
         with self.assertLogs("uvicorn.error", level="ERROR") as logs:
-            response = self.client.post("/api/chats/1/messages", json={"content": "hello"})
+            response = self.client.post(
+                "/api/chats/1/messages",
+                json={"content": "hello", "model_profile_id": "deepseek-v4-flash"},
+            )
 
         self.assertEqual(response.status_code, 502)
         self.assertIn(

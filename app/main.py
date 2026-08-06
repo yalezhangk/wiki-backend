@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from app.api.chats import router as chats_router
 from app.api.ingest import router as ingest_router
 from app.api.maintenance import router as maintenance_router
+from app.api.model_profiles import router as model_profiles_router
 from app.api.quality import router as quality_router
 from app.api.publish import router as publish_router
 from app.api.synthesis import router as synthesis_router
@@ -21,6 +22,7 @@ from app.logging_config import configure_logging
 from app.schemas.query import QueryRequest, QueryResponse
 from app.services.chat_service import ChatService
 from app.services.chat_turn_service import ChatTurnService
+from app.model_profiles import ModelProfileService
 from app.services.ingest_service import IngestService
 from app.services.health_maintenance_service import HealthMaintenanceService
 from app.services.graph_maintenance_service import GraphMaintenanceService
@@ -46,6 +48,7 @@ def create_app(
     publish_service: PublishService | None = None,
     synthesis_service: SynthesisService | None = None,
     maintenance_service: MaintenanceService | None = None,
+    model_profile_service: ModelProfileService | None = None,
     initialize_storage: bool = True,
 ) -> FastAPI:
     @asynccontextmanager
@@ -63,6 +66,7 @@ def create_app(
             app.state.chat_service = ChatService(storage)
         if not hasattr(app.state, "query_service"):
             app.state.query_service = QueryService(Path(settings.llm_wiki_repo_path))
+        app.state.model_profile_service.refresh_availability()
         if not hasattr(app.state, "quality_report_service"):
             app.state.quality_report_service = QualityReportService(
                 wiki_repo_path=Path(settings.llm_wiki_repo_path),
@@ -97,6 +101,7 @@ def create_app(
                 chat_service=app.state.chat_service,
                 query_service=app.state.query_service,
                 history_limit=settings.chat_history_limit,
+                model_profile_service=app.state.model_profile_service,
             )
         if not hasattr(app.state, "synthesis_service"):
             app.state.synthesis_service = SynthesisService(
@@ -159,6 +164,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.initialize_storage = initialize_storage
+    app.state.model_profile_service = model_profile_service or ModelProfileService()
     app.state.maintenance_service = maintenance_service
     app.state.quality_report_service = QualityReportService(
         wiki_repo_path=Path(settings.llm_wiki_repo_path),
@@ -256,6 +262,7 @@ def create_app(
         )
 
     app.include_router(chats_router)
+    app.include_router(model_profiles_router)
     app.include_router(ingest_router)
     app.include_router(maintenance_router)
     app.include_router(quality_router)

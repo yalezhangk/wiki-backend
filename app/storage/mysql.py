@@ -84,6 +84,8 @@ class MySQLStorage:
                         sources JSON NOT NULL COMMENT '回答引用来源列表（JSON）',
                         relevant_pages JSON NOT NULL COMMENT '查询命中的Wiki页面列表（JSON）',
                         citations JSON NOT NULL COMMENT '结构化Wiki引用列表（JSON）',
+                        model_profile_id VARCHAR(100) NULL COMMENT '生成回答时使用的模型档案ID',
+                        model_profile_label VARCHAR(200) NULL COMMENT '生成回答时使用的模型显示名称快照',
                         created_at DATETIME NOT NULL COMMENT '创建时间（北京时间）',
                         synthesis_path VARCHAR(500) NULL COMMENT '该助手消息保存成的Synthesis相对路径',
                         synthesized_at DATETIME NULL COMMENT '保存为Synthesis的时间（北京时间）',
@@ -228,6 +230,7 @@ class MySQLStorage:
                 self._ensure_ingest_progress_columns(cursor)
                 self._ensure_ingest_trigger_column(cursor)
                 self._ensure_message_citations_column(cursor)
+                self._ensure_message_model_profile_columns(cursor)
                 self._apply_schema_comments(cursor)
                 self._ensure_index(cursor, "chats", "idx_chats_updated_at", "updated_at DESC")
                 self._ensure_index(cursor, "chat_messages", "idx_chat_messages_chat_id_id", "chat_id, id")
@@ -365,6 +368,7 @@ class MySQLStorage:
         rows = self._fetch_all(
             """
             SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                   model_profile_id, model_profile_label,
                    created_at, synthesis_path, synthesized_at
             FROM chat_messages
             WHERE chat_id = %s
@@ -383,6 +387,7 @@ class MySQLStorage:
         if before_message_id is None:
             query = """
                 SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                       model_profile_id, model_profile_label,
                        created_at, synthesis_path, synthesized_at
                 FROM chat_messages
                 WHERE chat_id = %s
@@ -393,6 +398,7 @@ class MySQLStorage:
         else:
             query = """
                 SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                       model_profile_id, model_profile_label,
                        created_at, synthesis_path, synthesized_at
                 FROM chat_messages
                 WHERE chat_id = %s AND id < %s
@@ -425,6 +431,8 @@ class MySQLStorage:
         sources: list[str] | None = None,
         relevant_pages: list[str] | None = None,
         citations: list[CitationResponse] | None = None,
+        model_profile_id: str | None = None,
+        model_profile_label: str | None = None,
     ) -> ChatMessageResponse:
         created_at = self._beijing_now()
         serialized_sources = json.dumps(sources or [], ensure_ascii=False)
@@ -439,9 +447,10 @@ class MySQLStorage:
                 cursor.execute(
                     """
                     INSERT INTO chat_messages (
-                        chat_id, role, content, sources, relevant_pages, citations, created_at
+                        chat_id, role, content, sources, relevant_pages, citations,
+                        model_profile_id, model_profile_label, created_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         chat_id,
@@ -450,6 +459,8 @@ class MySQLStorage:
                         serialized_sources,
                         serialized_relevant_pages,
                         serialized_citations,
+                        model_profile_id,
+                        model_profile_label,
                         created_at,
                     ),
                 )
@@ -457,6 +468,7 @@ class MySQLStorage:
                 cursor.execute(
                     """
                     SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                           model_profile_id, model_profile_label,
                            created_at, synthesis_path, synthesized_at
                     FROM chat_messages
                     WHERE id = %s
@@ -472,6 +484,7 @@ class MySQLStorage:
         rows = self._fetch_all(
             """
             SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                   model_profile_id, model_profile_label,
                    created_at, synthesis_path, synthesized_at
             FROM chat_messages
             WHERE chat_id = %s AND id = %s
@@ -490,6 +503,7 @@ class MySQLStorage:
         rows = self._fetch_all(
             """
             SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                   model_profile_id, model_profile_label,
                    created_at, synthesis_path, synthesized_at
             FROM chat_messages
             WHERE chat_id = %s AND role = 'user' AND id < %s
@@ -528,6 +542,7 @@ class MySQLStorage:
                 cursor.execute(
                     """
                     SELECT id, chat_id, role, content, sources, relevant_pages, citations,
+                           model_profile_id, model_profile_label,
                            created_at, synthesis_path, synthesized_at
                     FROM chat_messages
                     WHERE chat_id = %s AND id = %s
@@ -1398,6 +1413,40 @@ class MySQLStorage:
         )
 
     @staticmethod
+    def _ensure_message_model_profile_columns(cursor: Any) -> None:
+        cursor.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'chat_messages'
+              AND COLUMN_NAME IN ('model_profile_id', 'model_profile_label')
+            """
+        )
+        existing_columns = {
+            row["COLUMN_NAME"] if isinstance(row, dict) else row[0]
+            for row in cursor.fetchall()
+        }
+        if "model_profile_id" not in existing_columns:
+            cursor.execute(
+                """
+                ALTER TABLE chat_messages
+                ADD COLUMN model_profile_id VARCHAR(100) NULL
+                    COMMENT '生成回答时使用的模型档案ID'
+                AFTER citations
+                """
+            )
+        if "model_profile_label" not in existing_columns:
+            cursor.execute(
+                """
+                ALTER TABLE chat_messages
+                ADD COLUMN model_profile_label VARCHAR(200) NULL
+                    COMMENT '生成回答时使用的模型显示名称快照'
+                AFTER model_profile_id
+                """
+            )
+
+    @staticmethod
     def _ensure_ingest_progress_columns(cursor: Any) -> None:
         cursor.execute(
             """
@@ -1499,6 +1548,8 @@ class MySQLStorage:
                 "sources": "回答引用来源列表（JSON）",
                 "relevant_pages": "查询命中的Wiki页面列表（JSON）",
                 "citations": "结构化Wiki引用列表（JSON）",
+                "model_profile_id": "生成回答时使用的模型档案ID",
+                "model_profile_label": "生成回答时使用的模型显示名称快照",
                 "created_at": "创建时间（北京时间）",
                 "synthesis_path": "该助手消息保存成的Synthesis相对路径",
                 "synthesized_at": "保存为Synthesis的时间（北京时间）",
@@ -1713,6 +1764,8 @@ class MySQLStorage:
                     MODIFY COLUMN sources JSON NOT NULL COMMENT '回答引用来源列表（JSON）',
                     MODIFY COLUMN relevant_pages JSON NOT NULL COMMENT '查询命中的Wiki页面列表（JSON）',
                     MODIFY COLUMN citations JSON NOT NULL COMMENT '结构化Wiki引用列表（JSON）',
+                    MODIFY COLUMN model_profile_id VARCHAR(100) NULL COMMENT '生成回答时使用的模型档案ID',
+                    MODIFY COLUMN model_profile_label VARCHAR(200) NULL COMMENT '生成回答时使用的模型显示名称快照',
                     MODIFY COLUMN created_at DATETIME NOT NULL COMMENT '创建时间（北京时间）',
                     MODIFY COLUMN synthesis_path VARCHAR(500) NULL COMMENT '该助手消息保存成的Synthesis相对路径',
                     MODIFY COLUMN synthesized_at DATETIME NULL COMMENT '保存为Synthesis的时间（北京时间）',
@@ -1788,6 +1841,8 @@ class MySQLStorage:
             sources=self._parse_json_field(row.get("sources")),
             relevant_pages=self._parse_json_field(row.get("relevant_pages")),
             citations=self._parse_citations_field(row.get("citations")),
+            model_profile_id=row.get("model_profile_id"),
+            model_profile_label=row.get("model_profile_label"),
             created_at=row["created_at"],
             synthesis_path=row.get("synthesis_path"),
             synthesized_at=row.get("synthesized_at"),

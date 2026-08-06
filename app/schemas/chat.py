@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from app.schemas.query import CitationResponse
+from app.schemas.model_profile import ModelProfileId
 
 NonEmptyContent = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
 ChatTitle = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
@@ -49,9 +50,15 @@ class ChatResponse(BaseModel):
 class ChatMessageCreateRequest(BaseModel):
     """发送聊天消息请求体。"""
 
+    model_config = ConfigDict(extra="forbid")
+
     content: NonEmptyContent = Field(
         description="用户发送的消息内容。该内容会结合历史消息参与本轮回答生成。",
         examples=["请继续解释上一条回答中的数据库设计。"],
+    )
+    model_profile_id: ModelProfileId = Field(
+        description="本轮回答使用的服务端受控模型档案 ID。",
+        examples=["deepseek-v4-flash"],
     )
 
 
@@ -82,6 +89,14 @@ class ChatMessageResponse(BaseModel):
     synthesized_at: datetime | None = Field(
         default=None,
         description="该助手消息保存为 Synthesis 的时间，北京时间、秒精度。",
+    )
+    model_profile_id: ModelProfileId | None = Field(
+        default=None,
+        description="生成该消息时使用的模型档案 ID；历史消息可能为空。",
+    )
+    model_profile_label: str | None = Field(
+        default=None,
+        description="生成该消息时使用的模型显示名称快照；历史消息可能为空。",
     )
 
 

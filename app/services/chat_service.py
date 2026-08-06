@@ -4,6 +4,7 @@ from datetime import datetime
 
 from app.config import settings
 from app.schemas.chat import ChatMessageResponse, ChatResponse
+from app.schemas.model_profile import ModelProfileId
 from app.schemas.query import CitationResponse
 from app.storage.mysql import ChatNotFoundError, MySQLStorage
 
@@ -82,6 +83,8 @@ class ChatService:
         sources: list[str] | None = None,
         relevant_pages: list[str] | None = None,
         citations: list[CitationResponse] | None = None,
+        model_profile_id: ModelProfileId | None = None,
+        model_profile_label: str | None = None,
     ) -> ChatMessageResponse:
         if role not in {"user", "assistant"}:
             raise ChatValidationError("role must be user or assistant")
@@ -94,6 +97,8 @@ class ChatService:
             sources=sources,
             relevant_pages=relevant_pages,
             citations=citations,
+            model_profile_id=model_profile_id,
+            model_profile_label=model_profile_label,
         )
 
     def update_chat_activity(

@@ -1,6 +1,9 @@
 # 模型选择功能交接
 
-> 本文记录 2026-08-04 的产品决策、当前代码事实和后续实现边界。它只用于后续在 `wiki-backend` 与 `quartz` 分别实现“模型选择”功能；本次没有修改运行时模型配置或 Quartz UI。
+> 状态（2026-08-10）：模型选择已在 `wiki-backend` 与 Quartz 实现。当前后端提供
+> `GET /api/model-profiles` 和 `GET /api/model-profiles/overview`，聊天请求必须提交
+> `model_profile_id`，助手消息持久化模型 ID 与显示名称快照。本文保留决策和验证背景，
+> 现行契约以 `README.md`、`app/model_profiles.py`、`app/api/model_profiles.py` 与测试为准。
 
 ## 目标
 
@@ -19,7 +22,7 @@
 
 目标模型 `qwen3.6:35b` 需在部署环境中验证 thinking 支持情况。Ollama 对支持的模型默认开启 thinking；开启时会先生成独立的推理内容，再给出最终回答。`think=false` 可以跳过这段推理，因此通常能明显缩短生成时间，但不会减少 35B 模型加载、长上下文提示词处理或 GPU/CPU offload 的耗时。[Ollama Thinking 文档](https://docs.ollama.com/capabilities/thinking) 是本结论的依据。
 
-当前 `wiki-backend/app/llm_config.py` 的 `completion(...)` 没有传递 thinking 控制参数；若已安装的 Ollama 和该模型 tag 支持该能力，则本地 Qwen 调用会使用 Ollama 的默认 thinking 行为。当前 Chats API 也不是流式响应，所以用户会把“生成 reasoning + 生成答案”完整感知为一次等待。
+当前 `wiki-backend/app/llm_config.py` 会把本地 Qwen 档案的 `reasoning_effort` 传给 LiteLLM：direct 使用 `"none"`，thinking 使用 `"low"`，由 Ollama Chat 适配器分别映射为 `think=false`、`think=true`。Chats API 仍不是流式响应，所以用户会把生成 reasoning 与最终答案完整感知为一次等待。
 
 ### 已完成的 LiteLLM / Ollama 兼容性验证
 
@@ -49,7 +52,7 @@ UI 不展示、保存或回传模型的原始推理内容。界面中的“深�
 
 首个版本不应让用户通过 Chats 改变 ingest、synthesis、质量检查或发布任务的模型；这些仍使用服务端受控的默认主模型。这样“本轮问答选择”与“系统运行配置”边界清晰。
 
-为避免模型配置含义混乱，后续实现应从当前一组全局 `WIKI_BACKEND_LLM_PROVIDER`、`WIKI_BACKEND_LLM_FAST_MODEL`、`WIKI_BACKEND_LLM_MAIN_MODEL`，演进为后端拥有的**受控模型档案（profile）白名单**。每个档案在服务器端映射 provider、模型名、API base、凭据引用、是否可用、是否支持 thinking 及默认 token/temperature；浏览器只能获得安全的 ID、显示名称、执行位置、策略和可用状态。
+为避免模型配置含义混乱，当前实现将 Chat 回答模型与内部 FAST/MAIN 配置分开：Chat 使用后端拥有的**受控模型档案（profile）白名单**，内部任务仍使用 `WIKI_BACKEND_LLM_PROVIDER`、`WIKI_BACKEND_LLM_FAST_MODEL`、`WIKI_BACKEND_LLM_MAIN_MODEL`。每个 Chat 档案在服务器端映射 provider、模型名、API base、凭据引用、可用性、thinking 策略及固定 token/temperature；浏览器只能获得安全的 ID、显示名称、执行位置、策略和可用状态。
 
 ## Quartz UI 方案
 
@@ -72,10 +75,11 @@ UI 不展示、保存或回传模型的原始推理内容。界面中的“深�
 
 ## wiki-backend 实现交接
 
-### 推荐 API 契约
+### 当前 API 契约
 
 ```text
 GET  /api/model-profiles
+GET  /api/model-profiles/overview
 POST /api/chats/{chat_id}/messages
      { "content": "...", "model_profile_id": "local-qwen3.6-35b-direct" }
 ```
@@ -88,7 +92,8 @@ POST /api/chats/{chat_id}/messages
   "label": "Qwen3.6 35B · 直接回答",
   "location": "local",
   "reasoning_mode": "direct",
-  "available": true
+  "available": true,
+  "is_default": false
 }
 ```
 
@@ -98,9 +103,9 @@ POST /api/chats/{chat_id}/messages
 
 profile 的“已启用”和“当前可用”是两个状态：`GET /api/model-profiles` 不返回未启用的 profile；已启用但健康检查暂不可用的 profile 保留在列表中并返回 `available: false`，供 UI 禁用。健康状态应有缓存或后台刷新，不能在每次加载页面时同步探测模型。
 
-`ChatMessageCreateRequest`、`ChatTurnService`、`QueryService` 与 `app/llm_config.py` 需要把本轮 profile 一路显式传递。`QueryService` 的检索辅助仍调用固定 FAST 配置，最终回答改用已解析的 profile。将 profile ID 和实际显示标签快照写入用户消息和/或助手消息；推荐至少写入助手消息，并在 `ChatMessageResponse` 中返回，以支持刷新后渲染徽标。标签必须是生成该回答当时的快照，不能在读取历史时用当前 profile 配置重新推导。
+`ChatMessageCreateRequest`、`ChatTurnService`、`QueryService` 与 `app/llm_config.py` 已把本轮 profile 一路显式传递。`QueryService` 的检索辅助仍调用固定 FAST 配置，最终回答使用已解析的 profile。Profile ID 和实际显示标签快照写入 assistant message，并在 `ChatMessageResponse` 中返回；读取历史时不会用当前 profile 配置重新推导标签。
 
-这会涉及 MySQL schema 迁移。迁移必须兼容已有 `chat_messages`：新增可空字段、启动初始化/升级逻辑、fake storage 和 MySQL 集成测试都要同步更新，不能只修改 Pydantic schema。
+当前 MySQL 启动初始化/升级逻辑会为已有 `chat_messages` 补充可空的 profile ID 与标签字段；旧消息读取时保持为空。Fake storage、API 测试和 MySQL 集成测试覆盖相同兼容边界。
 
 ### 必测项
 
@@ -123,7 +128,7 @@ profile 的“已启用”和“当前可用”是两个状态：`GET /api/model
 
 Quartz 只通过同源 `/api` 调用后端，不能把 Ollama `11434` 或后端 `8081` 暴露给浏览器。源码变更后必须构建 `chats/dist`，再构建 Quartz `public/`；不要手改生成物。
 
-## 后续实施顺序
+## 已完成的实施顺序
 
 1. 在 `wiki-backend` 先定义 profile 配置模型、健康/可用性规则、API schema、消息持久化与测试。
 2. 用两种 Qwen 模式做端到端试验，记录首 token、总耗时、tokens/s、prompt tokens、GPU/CPU offload；基于实测再决定 UI 默认项，而不是仅凭“35B 应该慢/快”。

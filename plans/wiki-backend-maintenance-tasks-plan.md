@@ -1,5 +1,9 @@
 # wiki-backend 知识库运维任务计划
 
+> 状态（2026-08-10）：health、graph、lint、`health → graph → lint` 工作流、MySQL 审计和
+> `GET /api/quality/latest` 已实现。本文保留设计理由和验收矩阵；现行默认值与接口以
+> `app/services/maintenance_service.py`、`app/api/maintenance.py`、`README.md` 和测试为准。
+
 ## 1. 目标
 
 在 `wiki-backend` 实施一个受控、可审计、可恢复的运维任务框架，并以该框架实现与 `llm-wiki-agent` 语义兼容的三项能力：

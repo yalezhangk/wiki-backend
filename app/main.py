@@ -139,11 +139,13 @@ def create_app(
     app = FastAPI(
         title=settings.app_name,
         description=(
-            "Wiki Backend API，提供健康检查、知识库问答、聊天会话、文档入库和分析保存能力。"
+            "Wiki Backend API，提供健康检查、模型档案、知识库问答、聊天会话、文档入库、分析保存、Quartz 发布和知识库质量维护能力。"
             "\n\n"
-            "接口分为七类："
+            "接口分为九类："
             "\n"
             "- `health`：用于服务存活检查。"
+            "\n"
+            "- `model-profiles`：返回服务端允许公开的 Chat 模型档案和内部模型概览。"
             "\n"
             "- `query`：无状态单轮问答，每次请求独立执行，不保存会话历史。"
             "\n"
@@ -152,13 +154,13 @@ def create_app(
             "- `ingest`：上传资料并查询异步入库任务状态；入库成功不代表 Quartz 已发布。"
             "\n"
             "- `synthesis`：根据已持久化的助手消息生成 Wiki Synthesis，不接收回答正文。"
-            "\n\n"
+            "\n"
             "- `publish`：异步构建 Quartz 静态站点；入库成功不等于页面已发布。"
-            "\n\n"
+            "\n"
             "- `maintenance`：受控的异步知识库维护任务。创建接口仅入队，需通过任务查询接口轮询状态；"
             "health 默认写 `health-report.md`，graph 会写 graph artifact，lint 会写报告与 log；"
             "运行报告不会作为知识页重新参与维护或问答。"
-            "\n\n"
+            "\n"
             "- `quality`：最近质量报告的只读快照。该接口不会执行 maintenance 任务、调用 LLM、写入 Wiki 或触发 Quartz 发布。"
         ),
         lifespan=lifespan,
@@ -217,7 +219,7 @@ def create_app(
         "/api/health",
         tags=["health"],
         summary="检查服务状态",
-        description="用于确认 FastAPI 服务进程是否正常启动。该接口不访问 LLM，也不依赖聊天业务。",
+        description="用于确认 FastAPI 服务进程是否正常启动。该请求处理不访问 MySQL 或 LLM，也不依赖其他业务服务。",
     )
     def health() -> dict[str, str]:
         """返回最小化健康检查结果。"""
@@ -249,7 +251,7 @@ def create_app(
         payload: QueryRequest,
         query_service_dependency: QueryService = Depends(get_query_service),
     ) -> QueryResponse:
-        """执行一次独立问答并返回答案、来源文件和相关页面。"""
+        """执行一次独立问答并返回答案、来源路径、相关页面和结构化引用。"""
         try:
             result = query_service_dependency.run(payload.question)
         except QueryServiceError as exc:

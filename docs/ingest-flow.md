@@ -7,19 +7,21 @@
 Ingest 由 `wiki-backend` 提供 HTTP 接口，使用 MySQL 持久化任务元数据，并在
 `WIKI_AGENT_REPO_PATH` 指向的 agent 仓库内读写 `raw/uploads/` 与 `wiki/`。
 
-Ingest 成功只表示 Wiki 文件已写入和校验完成；它不会自动重建或发布 Quartz
-静态站点。
+Ingest 成功只表示 Wiki 文件已写入和校验完成。应用正常初始化 MySQL 与
+`PublishService` 时，成功任务会自动加入 Quartz 合并发布队列；只有对应
+`publication.status=published` 或发布任务成功后，才表示 `quartz/public` 已更新。
 
 ## 调用入口与异步模型
 
 客户端通过 `POST /api/ingest/jobs` 以 `multipart/form-data` 上传 `file`，可选参数
-`auto_convert` 默认为 `true`。
+`auto_convert` 默认为 `true`，`trigger` 默认为 `manual`；DGX 定时同步显式使用
+`trigger=scheduled`。
 
 路由将工作交给 `IngestService.create_job()`：文件成功保存、MySQL 任务创建且任务放入
 内存队列后，即返回 `202 Accepted`。这表示任务已入队，不表示资料已进入 Wiki。
 
 应用启动时会创建一个 `IngestService`；服务内部使用一个 daemon worker 线程消费
-`Queue[str]` 中的 job ID。因此当前队列是进程内队列，而不是由 MySQL 驱动的可恢复任务队列。
+`Queue[int]` 中的数字 job ID。因此当前队列是进程内队列，而不是由 MySQL 驱动的可恢复任务队列。
 
 ```text
 POST /api/ingest/jobs
@@ -28,6 +30,8 @@ POST /api/ingest/jobs
   -> 内存 Queue
   -> worker 转换、LLM 提取、写 Wiki、校验
   -> MySQL 更新 succeeded 或 failed
+  -> succeeded 时加入 Quartz 发布队列
+  -> failed 时删除该任务 source_path 指向的上传源文件
 ```
 
 ## 上传接收与源文件落盘
@@ -36,8 +40,8 @@ POST /api/ingest/jobs
 
 1. 取 `Path(file.filename).name`，丢弃浏览器携带的客户端目录。
 2. 检查文件名不为空、扩展名受支持；非 `.md` 文件在 `auto_convert=false` 时被拒绝。
-3. 使用 `_safe_filename()` 生成保存名：替换 Windows 非法字符、将连续空白替换为 `-`、去除首尾 `.`/`-`，最多保留 180 个字符。因此“原文件名”指安全处理后的文件名，而不是不经处理的客户端字节串。
-4. 目标路径为 `raw/uploads/<保存名>`。例如上传 `报告.pdf`，源文件保存为 `raw/uploads/报告.pdf`；不再添加日期、随机数等前缀。
+3. 使用 `_safe_filename()` 生成保存名：替换 Windows 非法字符、将连续空白替换为 `-`、去除首尾 `.`/`-`，最多保留 180 个字符。API 的 `original_filename` 保留去除客户端目录后的原名，`source_path` 使用安全保存名。
+4. 人工上传的目标路径为 `raw/uploads/<保存名>`。例如上传 `报告.pdf`，源文件保存为 `raw/uploads/报告.pdf`；定时同步任务会在安全文件名后追加随机 UUID，避免不同源目录中的同名文件互相冲突。
 5. 使用 64 KiB 分块以独占新建模式写文件；校验总大小、声明的 MIME 类型，以及 PDF、Office、EPUB、XLS、RTF、WAV、MP3 等格式的文件签名或容器结构。
 6. 若大小、类型或签名校验失败，删除本次部分落盘文件，不创建任务。
 
@@ -52,12 +56,12 @@ POST /api/ingest/jobs
 
 worker 取到 job ID 后，将任务标为 `running`，再按以下顺序执行：
 
-1. **转换**：Markdown 直接处理；其他受支持格式通过 `MarkItDown` 转换，并写入源文件同目录、同基名的 `.md`。例如 `报告.pdf` 转换为 `报告.md`。
+1. **转换**：Markdown 直接处理；PDF 先用 `pdfplumber` 检查加密、损坏和文本层。有文本层时优先使用 MarkItDown，转换报错时回退 PyMuPDF；无文本层或原生转换结果质量不足时，若显式启用且可用则先尝试 Marker，否则直接使用 RapidOCR，Marker 超时、失败、无输出或低质量时也回退 RapidOCR。其他受支持格式通过 MarkItDown 转换。转换结果写入源文件同目录、同基名的 `.md`。
 2. **提取**：读取 Markdown 内容，并附带 `wiki/index.md`、`wiki/overview.md` 与最近五篇 source 页面组成 Prompt，调用主 LLM。
 3. **结果校验**：LLM 必须返回符合 `IngestLLMResult` 的 JSON。首次 JSON 无法解析时会请求模型修复一次；明确截断的响应直接失败。失败响应会在 `uploads/` 旁写入带 job ID 的诊断文本。
 4. **写 Wiki**：校验 `slug` 和 Entity/Concept 输出路径后，原子写入 `wiki/sources/<slug>.md`、`wiki/entities/*.md`、`wiki/concepts/*.md`；必要时覆盖 `wiki/overview.md`，并更新 `wiki/index.md` 与 `wiki/log.md`。
 5. **后处理校验**：检查本次改动页面中的断裂 `[[wikilinks]]`，并检查新页面是否出现在索引中。
-6. **完成或失败**：成功时写入创建/更新页面、矛盾列表和校验结果，并标为 `succeeded`；任何处理异常都会记录错误并标为 `failed`。
+6. **完成或失败**：成功时写入创建/更新页面、矛盾列表和校验结果，标为 `succeeded`，并在 `PublishService` 可用时加入 Quartz 发布队列；任何处理异常都会记录错误、标为 `failed`，并删除该任务 `source_path` 指向的上传源文件。非 Markdown 转换结果和 LLM 调试文件不是 `source_path`，当前不会随之统一删除。
 
 ## 阶段与进度
 
@@ -74,7 +78,7 @@ worker 取到 job ID 后，将任务标为 `running`，再按以下顺序执行�
 
 ## 同名文件判断
 
-上传源文件的同名判断由文件系统完成，不查询 MySQL：
+人工上传源文件的同名判断由文件系统完成，不查询 MySQL：
 
 1. 保存前先检查 `raw/uploads/<保存名>` 是否存在。存在即抛出 `IngestConflictError`。
 2. 真正落盘时使用 `open("xb")` 独占创建。即使两个请求同时通过前置检查，后到请求也会因 `FileExistsError` 转为同一个冲突错误。
@@ -86,6 +90,10 @@ worker 取到 job ID 后，将任务标为 `running`，再按以下顺序执行�
 - 两个原始文件名在 `_safe_filename()` 后变为相同保存名，例如 `a b.pdf` 与 `a-b.pdf`。
 
 扩展名、`auto_convert` 等基础校验发生在同名检查之前；不受支持的文件会先返回 `422`，而不是 `409`。
+
+定时同步使用独立边界：`trigger=scheduled` 会为暂存文件追加随机 UUID，同名源文件由
+`scheduled_ingest_sources` 的源根目录、相对路径和文件身份负责幂等判断，而不是依赖
+`raw/uploads/` 的人工上传同名冲突规则。
 
 ### 转换 Markdown 的独立边界
 

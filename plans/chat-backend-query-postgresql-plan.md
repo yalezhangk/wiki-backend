@@ -1,5 +1,9 @@
 # Chats 后端数据库、服务及接口设计计划
 
+> 归档说明（2026-08-10）：这是 Chats 分层和 MySQL 落地前的历史设计，不是当前接口契约。
+> 当前系统已使用数字自增 ID，并已包含 ingest、synthesis、publish、maintenance、quality 和
+> model-profiles；现行行为以 `README.md`、`app/` 与 `tests/` 为准。下文中的“当前”均指该计划编写时的基线。
+
 ## Summary
 
 目标只围绕聊天页需求设计后端：支持 `chat list`、`new chat`、进入单个 chat 后连续提问，并且同一个 chat 内后续问题会带上最近历史消息参与回答。

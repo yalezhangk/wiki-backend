@@ -1,5 +1,9 @@
 # 中压-市场部 样本知识库：wiki-backend API 实施交接
 
+> 状态（2026-08-10）：本文是 Phase B 开发时的历史交接。B0 数字 ID 契约、B1 Ingest
+> 阶段/进度、B2 结构化引用以及当时 Deferred 的 Publish 编排均已实现；质量快照当前使用
+> `GET /api/quality/latest`。现行接口以 `README.md`、FastAPI OpenAPI、`app/` 与测试为准。
+
 > 用途：在 `wiki-backend` 项目中新开开发线程时，作为背景、范围、接口优先级和验收基线。  
 > 产品规格：`../UI_PRODUCT_SPEC.md`  
 > 前端交接：`../quartz/KNOWLEDGE_PLATFORM_UI_IMPLEMENTATION_PLAN.md`  

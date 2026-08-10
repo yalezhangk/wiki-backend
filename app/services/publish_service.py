@@ -64,7 +64,7 @@ class PublishStorage(Protocol):
 
 
 class PublishService:
-    """串行构建 Quartz，并以原子链接替换当前静态版本。"""
+    """串行构建 Quartz；生产 Linux 原子切换链接，Windows 失败时恢复旧链接。"""
 
     def __init__(
         self,

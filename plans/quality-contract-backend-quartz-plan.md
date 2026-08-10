@@ -1,8 +1,12 @@
 # 知识质量机器可读契约：wiki-backend + Quartz 开发计划
 
+> 已取代（2026-08-10）：本文中的待开发 v1 `/api/quality/summary` 提案没有成为现行接口。
+> 当前后端提供 `GET /api/quality/latest`，只读聚合最近 Health/Lint/Graph 报告和 maintenance
+> 状态；Quartz 也调用该路径。下文保留为历史方案，不得作为当前路由或响应 schema 的依据。
+
 ## 1. 状态、目标与范围
 
-- 状态：待开发。
+- 状态：历史提案，已由 `/api/quality/latest` 的实现取代。
 - 目标：把“知识质量”从 Quartz 的构建期元数据检查，扩展为一份由 `wiki-backend` 生成、持久化并通过同源 API 提供的质量快照；Quartz 负责展示质量范围、时效、问题队列和对应 Wiki 页面。
 - 改动仓库：`wiki-backend`、`quartz`。
 - 不改动仓库：`llm-wiki-agent`。它继续是 `wiki/`、`raw/`、`graph/` 的共享数据提供者；后端不得导入、调用或修改其 `tools/*.py` 源码。

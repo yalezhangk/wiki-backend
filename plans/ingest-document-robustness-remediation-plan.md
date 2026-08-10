@@ -13,8 +13,8 @@
 
 - [x] 在调用 LLM 前检查转换结果：拒绝空内容、过短内容、过多控制字符或 `�`。
 - [x] PDF 预检：加密为 `pdf_encrypted`、损坏为 `pdf_unreadable`；无文本层和符号伪文本先尝试本地 OCR。
-- [x] Windows 使用不依赖 Docker 的 RapidOCR；其他系统保留 Marker 优先、RapidOCR fallback。
-- [x] 原生文本 PDF 先用 MarkItDown，转换报错时再尝试 `pymupdf4llm`。
+- [x] 所有系统默认使用不依赖 Docker 的 RapidOCR；显式启用且 Marker CLI 可用时先尝试 Marker，失败后回退 RapidOCR。
+- [x] 原生文本 PDF 先用 MarkItDown，转换报错时再尝试 PyMuPDF；当前不使用 `pymupdf4llm`。
 - [x] LLM 契约增加 `ingest_status` 和 `ingest_error`；只有
   `{"ingest_status":"succeeded","ingest_error":null}` 才能写 Wiki。
 - [x] 失败短路：转换或 LLM 失败时不写 Wiki、不标记成功、不触发 publish。

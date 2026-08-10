@@ -1,4 +1,4 @@
 # 可选的高保真 PDF OCR，不是 wiki-backend 的默认运行依赖。
-# 仅在已于 DGX Spark 验证 Docker、模型下载与 Marker 输出质量后安装。
+# 仅在已于 DGX Spark 验证 Marker CLI、ARM64 依赖、模型下载与输出质量后安装。
 -r requirements.txt
 marker-pdf==2.0.0

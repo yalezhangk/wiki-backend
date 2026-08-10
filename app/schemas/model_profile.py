@@ -39,8 +39,8 @@ class ModelOverviewResponse(BaseModel):
         description="知识问答 Chat 当前可选择的已启用模型档案。"
     )
     fast_model: InternalModelResponse = Field(
-        description="快速问答内部任务当前使用的模型。"
+        description="页面选择和图关系推断等内部轻量任务当前使用的模型。"
     )
     main_model: InternalModelResponse = Field(
-        description="深度分析内部任务当前使用的模型。"
+        description="无状态问答、Ingest 和语义巡检等内部主任务当前使用的模型。"
     )

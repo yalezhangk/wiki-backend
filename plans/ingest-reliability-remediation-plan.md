@@ -1,5 +1,10 @@
 # Ingest 可靠性修复计划
 
+> 归档说明（2026-08-10）：本文记录一次历史故障及分阶段修复建议，不是当前 Ingest 契约。
+> 当前任务 ID 和进程内队列元素均为正整数；LLM 截断分类、一次 JSON 修复、10 MiB 上传限制、
+> PDF/OCR 校验和失败上传源文件清理已落地。现行行为以 `README.md`、`docs/ingest-flow.md`、
+> `app/services/ingest_service.py` 和测试为准。
+
 ## 背景与本次故障证据
 
 UI 通过 `POST /api/ingest/jobs` 上传 PDF 后，任务在 `extracting` 阶段失败。排查保存到 `raw/uploads/` 的两份 LLM 原始响应后确认：两份内容都以 JSON 对象开头，但均在 JSON 字符串内部中止，缺少闭合的引号和 `}`。

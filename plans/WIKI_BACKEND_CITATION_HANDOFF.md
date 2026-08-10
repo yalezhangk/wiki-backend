@@ -1,5 +1,10 @@
 # wiki-backend：Chats 行内引用格式交接
 
+> 已取代（2026-08-10）：本文记录结构化 `citations` 落地前的第一阶段协议。当前
+> `POST /api/query` 使用 `[n]` 对应 `sources[n - 1]`；有状态 Chat 会把有效数字引用转换为
+> `[[path|title]]` WikiLink，并在 MySQL/API 中持久化 `citations`、`sources` 和
+> `relevant_pages`。现行契约以 `README.md`、`app/services/query_service.py` 和测试为准。
+
 ## 目标
 
 Quartz Chats 已调整为：
@@ -8,7 +13,7 @@ Quartz Chats 已调整为：
 - 正文中的 `[1]`、`[2]` 等标记会定位到右侧既有的“引用来源”条目；
 - 右侧“引用来源”继续展示完整的 `sources` 与 `relevant_pages`，标题和现有 API 路由不变。
 
-## 当前接口契约
+## 当时接口契约
 
 现有 `GET /api/chats/{chat_id}/messages` 与发送消息响应中的 assistant message 已包含：
 

@@ -6,12 +6,14 @@
 
 `wiki-backend` 是 FastAPI 服务层，负责：
 
-- 对外提供 health、query、chats、ingest 和 synthesis API。
-- 使用 MySQL 保存聊天、消息和 ingest job 元数据。
-- 独立实现 HTTP query、ingest 和 synthesis，并在预期业务流程中读写相邻 `llm-wiki-agent` 的 Wiki 数据。
+- 对外提供 health、model-profiles、query、chats、ingest、synthesis、publish、maintenance 和 quality API。
+- 使用 MySQL 保存聊天、消息、ingest、定时同步、发布和维护任务元数据。
+- 独立实现 HTTP query、ingest、synthesis、Quartz 发布和知识库维护，并在预期业务流程中读写相邻 `llm-wiki-agent` 的 Wiki 数据与运行产物。
 - 由 DGX Nginx 通过同源 `/api/` 提供给 Quartz UI。
 
-它不负责提供 Quartz 静态页面，也不负责自动重建 `quartz/public/`。
+它不直接提供 Quartz 静态页面。Ingest 或 synthesis 成功后，后端会把 Wiki 变更加入
+`PublishService` 的合并发布队列；发布 worker 通过相邻 `quartz` 构建静态站点并切换
+`quartz/public` 链接。Maintenance/quality 不会自动触发 Quartz 发布。
 
 ## 固定部署边界
 
@@ -36,15 +38,17 @@ ECS Nginx :8080
 
 ## 代码结构
 
-- `app/main.py`：FastAPI 应用、生命周期、中间件和 query/health 路由。
-- `app/api/`：chats、ingest、synthesis 路由。
+- `app/main.py`：FastAPI 应用、生命周期、中间件、query/health 路由和各业务 router 挂载。
+- `app/api/`：chats、model-profiles、ingest、synthesis、publish、maintenance、quality 路由。
 - `app/schemas/`：Pydantic 请求与响应模型。
 - `app/services/`：业务编排，不把 HTTP 细节下沉到服务层。
-- `app/storage/mysql.py`：MySQL 持久化和初始化。
+- `app/storage/mysql.py`：聊天、ingest、定时同步、发布和维护任务的 MySQL 持久化与初始化。
 - `app/config.py`：从 `.env` 读取配置。
 - `app/llm_config.py`：后端自有 LiteLLM 调用配置，不依赖 agent 源码。
 - `app/prompts/`：后端运行时 Prompt；`agent_instructions.md` 只同步自 `llm-wiki-agent/AGENTS.md`。
 - `app/logging_config.py`：应用和 Uvicorn 日志配置。
+- `app/scheduled_ingest.py`：通过本机 Ingest API 执行每日增量 Markdown 同步的命令入口。
+- `tools/migrate_uuid_primary_keys.py`：显式执行的历史 UUID 主键迁移工具，不在服务启动时自动运行。
 - `tests/`：API、服务、启动、日志和 MySQL 集成测试。
 
 ## Python 规则
@@ -68,6 +72,7 @@ ECS Nginx :8080
 - 不动态导入或执行 `llm-wiki-agent` 的 Python 源码。
 - `app/prompts/agent_instructions.md` 只允许同步 `llm-wiki-agent/AGENTS.md`；禁止混入 `CLAUDE.md`。
 - 未经用户明确授权，不修改 `llm-wiki-agent` 源码。ingest/synthesis 运行时对其 `wiki/` 的预期业务写入除外。
+- 发布服务只读取 `llm-wiki-agent/wiki` 快照并写入相邻 `quartz/.publish` 与 `quartz/public`；不要手工编辑生成的 `public/`。
 - 不为未来 Docker 化提前增加无需求的容器配置；当前默认是 DGX 宿主机 `uv + .venv`。
 
 ## 配置约定
@@ -83,9 +88,22 @@ WIKI_BACKEND_MYSQL_PASSWORD=replace-with-a-strong-password
 WIKI_BACKEND_MYSQL_DATABASE=wiki_backend
 WIKI_BACKEND_DEFAULT_CHAT_TITLE=新对话
 WIKI_BACKEND_CHAT_HISTORY_LIMIT=6
+WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES=10485760
+WIKI_BACKEND_INGEST_LLM_MAX_TOKENS=8192
+WIKI_BACKEND_INGEST_ENABLE_MARKER_OCR=false
+WIKI_BACKEND_SCHEDULED_INGEST_ROOT=/path/to/source-directory
+WIKI_BACKEND_SCHEDULED_INGEST_API_URL=http://127.0.0.1:8081
+WIKI_BACKEND_QUARTZ_REPO_PATH=../quartz
+WIKI_BACKEND_PUBLISH_NODE_EXECUTABLE=node
+WIKI_BACKEND_PUBLISH_BUILD_TIMEOUT_SECONDS=900
+WIKI_BACKEND_PUBLISH_DEBOUNCE_SECONDS=120
+WIKI_BACKEND_PUBLISH_MAX_DELAY_SECONDS=600
+WIKI_BACKEND_QUALITY_STALE_AFTER_HOURS=168
 WIKI_BACKEND_LLM_PROVIDER=deepseek
 WIKI_BACKEND_LLM_FAST_MODEL=deepseek-v4-flash
 WIKI_BACKEND_LLM_MAIN_MODEL=deepseek-v4-pro
+WIKI_BACKEND_LLM_FAST_MAX_TOKENS=1024
+WIKI_BACKEND_LLM_MAIN_MAX_TOKENS=4096
 WIKI_BACKEND_DEEPSEEK_API_KEY=
 WIKI_BACKEND_DEEPSEEK_API_BASE=https://api.deepseek.com
 WIKI_BACKEND_OLLAMA_API_BASE=http://127.0.0.1:11434
@@ -173,10 +191,13 @@ WIKI_BACKEND_RUN_MYSQL_INTEGRATION=1 \
 
 - `POST /api/query` 是无状态问答，不应隐式创建 chat。
 - chat API 会写 MySQL，测试时优先使用 fake storage。
-- ingest 会创建任务并可能修改 `llm-wiki-agent` 中的知识库内容。
-- synthesis 会写 Wiki Markdown 并更新消息 synthesis 状态。
+- ingest 会创建任务、写入 `llm-wiki-agent` 知识库；成功后会加入 Quartz 发布队列，失败后会删除该任务记录的上传源文件。
+- synthesis 会写 Wiki Markdown、更新消息 synthesis 状态，并在成功后加入 Quartz 发布队列。
+- publish 会启动 Quartz 构建子进程，并写入 `quartz/.publish`、切换 `quartz/public` 链接。
+- maintenance 会写 MySQL；除 `health` 且 `save_report=false` 外，还会写 Wiki 或 graph 运行产物，但不会自动发布 Quartz。
+- quality 只读最近报告和维护任务状态，不运行巡检、不调用 LLM、不写 Wiki、不触发发布。
 - 对会写真实 Wiki、数据库或调用真实 LLM 的验证，执行前必须明确环境和副作用。
-- ingest/synthesis 成功后不要宣称 Quartz 页面已经更新；只有重新构建 `public/` 后静态站点才更新。
+- ingest/synthesis 的 `succeeded` 只表示 Wiki 写入成功；只有对应 `publication.status=published` 或发布任务成功后，才能宣称 `quartz/public` 已更新。
 
 ## 安全要求
 
@@ -209,8 +230,8 @@ uname -m
 - 依赖是否提供 ARM64 wheel，或能否可靠源码编译。
 - 路径是否使用 `pathlib` / Linux 语义。
 - 文件是否为 LF，脚本是否有执行权限。
-- `WIKI_AGENT_REPO_PATH`、MySQL 和模型服务是否可达。
-- health、query、chat、ingest、synthesis 的端到端行为。
+- `WIKI_AGENT_REPO_PATH`、`WIKI_BACKEND_QUARTZ_REPO_PATH`、MySQL、Node.js 和模型服务是否可达。
+- health、model-profiles、query、chat、ingest、synthesis、publish、maintenance、quality 的端到端行为。
 
 ## 完成标准
 

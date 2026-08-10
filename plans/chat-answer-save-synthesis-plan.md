@@ -1,5 +1,9 @@
 # Chat 答案保存为 Synthesis 实施计划
 
+> 状态（2026-08-10）：已实现。当前 `POST /api/synthesis` 使用正整数 `chat_id` 和
+> `assistant_message_id`，写入 `wiki/syntheses/`、`wiki/index.md`、`wiki/log.md` 和消息保存状态，
+> 成功后还会加入 Quartz 发布队列。现行契约以 `README.md`、`app/api/synthesis.py` 和测试为准。
+
 ## Summary
 
 目标是在现有有状态 Chat 流程上增加“保存优秀答案”能力：用户在 UI 中选中某条已经生成并持久化的 assistant message，调用独立的 `POST /api/synthesis`，后端将该答案保存为：
@@ -227,14 +231,14 @@ README.md
 
 ```python
 class SynthesisCreateRequest(BaseModel):
-    chat_id: str
+    chat_id: int
     assistant_message_id: int
     title: SynthesisTitle | None = None
 ```
 
 校验规则：
 
-- `chat_id` 非空，最大 36 个字符；如现有 Chat ID 固定为 UUID，可进一步使用 Pydantic UUID 类型。
+- `chat_id > 0`。
 - `assistant_message_id > 0`。
 - `title` 执行 `strip_whitespace=True`、`min_length=1`、`max_length=80`。
 
@@ -242,12 +246,13 @@ class SynthesisCreateRequest(BaseModel):
 
 ```python
 class SynthesisResponse(BaseModel):
-    chat_id: str
+    chat_id: int
     assistant_message_id: int
     question_message_id: int
     title: str
     path: str
     created_at: datetime
+    publication: PublicationResponse | None = None
 ```
 
 ### `ChatMessageResponse`
@@ -285,21 +290,21 @@ ALTER TABLE chat_messages
 ```python
 def get_message(
     self,
-    chat_id: str,
+    chat_id: int,
     message_id: int,
 ) -> ChatMessageResponse | None:
     ...
 
 def get_previous_user_message(
     self,
-    chat_id: str,
+    chat_id: int,
     before_message_id: int,
 ) -> ChatMessageResponse | None:
     ...
 
 def mark_message_synthesized(
     self,
-    chat_id: str,
+    chat_id: int,
     message_id: int,
     synthesis_path: str,
     synthesized_at: datetime,
@@ -328,7 +333,7 @@ class SynthesisService:
     def save_chat_answer(
         self,
         *,
-        chat_id: str,
+        chat_id: int,
         assistant_message_id: int,
         title: str | None,
     ) -> SynthesisResponse:

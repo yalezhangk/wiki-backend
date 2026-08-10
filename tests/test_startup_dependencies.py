@@ -173,7 +173,17 @@ class StartupDependencyTests(unittest.TestCase):
     def test_application_description_lists_all_current_api_groups(self) -> None:
         description = create_app(initialize_storage=False).description
 
-        for group in ("health", "query", "chats", "ingest", "synthesis"):
+        for group in (
+            "health",
+            "model-profiles",
+            "query",
+            "chats",
+            "ingest",
+            "synthesis",
+            "publish",
+            "maintenance",
+            "quality",
+        ):
             self.assertIn(f"`{group}`", description)
 
     def test_query_contract_returns_answer_and_wiki_identifiers(self) -> None:

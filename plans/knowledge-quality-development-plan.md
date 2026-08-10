@@ -1,5 +1,9 @@
 # 知识质量开发计划（以已确认原型为准）
 
+> 状态（2026-08-10）：后端 `GET /api/quality/latest`、maintenance 任务和 Quartz 运行时质量页
+> 已实现。本文保留开发与验收背景；当前机器可读契约以 `app/schemas/quality.py`、
+> `app/api/quality.py`、`README.md` 和测试为准。
+
 ## 0. 本计划的唯一前端基线
 
 本计划以 [design/ui-prototypes/quality.html](../design/ui-prototypes/quality.html) 为 `/quality` 的**默认桌面视图、信息层级和交互验收标准**。它不是灵感参考，也不是可选方案。

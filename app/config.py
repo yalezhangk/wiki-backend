@@ -126,12 +126,12 @@ class Settings(BaseSettings):
         validation_alias="WIKI_BACKEND_LLM_API_BASE",
     )
     llm_fast_max_tokens: int = Field(
-        default=1024,
+        default=5120,
         gt=0,
         validation_alias="WIKI_BACKEND_LLM_FAST_MAX_TOKENS",
     )
     llm_main_max_tokens: int = Field(
-        default=4096,
+        default=8192,
         gt=0,
         validation_alias="WIKI_BACKEND_LLM_MAIN_MAX_TOKENS",
     )

@@ -162,19 +162,19 @@ class ScheduledIngestServiceTests(unittest.TestCase):
         self.assertEqual(api_client.uploads, ["one.md", "one.md"])
         self.assertEqual(set(path for _, path in self.storage.records), {"one.md", "nested/one.md"})
 
-    def test_failed_source_retries_once_then_is_never_automatically_retried(self) -> None:
+    def test_failed_source_is_submitted_once_then_is_never_automatically_retried(self) -> None:
         (self.root / "failed.md").write_text("# failed", encoding="utf-8")
-        api_client = FakeScheduledApiClient({"failed.md": ["failed", "failed"]})
+        api_client = FakeScheduledApiClient({"failed.md": ["failed"]})
         service = self._service(api_client)
 
         first = service.run()
         second = service.run()
 
         self.assertEqual(first.failed_count, 1)
-        self.assertEqual(self.storage.attempts[1], 2)
+        self.assertEqual(self.storage.attempts[1], 1)
         self.assertEqual(self.storage.completed[1][0], "failed")
         self.assertEqual(second.skipped_count, 1)
-        self.assertEqual(api_client.uploads, ["failed.md", "failed.md"])
+        self.assertEqual(api_client.uploads, ["failed.md"])
 
     def test_logs_scan_summary_and_already_recorded_source(self) -> None:
         (self.root / "known.md").write_text("# known", encoding="utf-8")
@@ -210,14 +210,14 @@ class ScheduledIngestServiceTests(unittest.TestCase):
         self.assertEqual(self.storage.records, {})
         self.assertEqual(api_client.uploads, [])
 
-    def test_empty_markdown_is_recorded_as_a_final_failure_after_two_attempts(self) -> None:
+    def test_empty_markdown_is_recorded_as_a_final_failure_after_one_attempt(self) -> None:
         (self.root / "empty.md").write_bytes(b"")
-        api_client = FakeScheduledApiClient({"empty.md": ["failed", "failed"]})
+        api_client = FakeScheduledApiClient({"empty.md": ["failed"]})
 
         summary = self._service(api_client).run()
 
         self.assertEqual(summary.failed_count, 1)
-        self.assertEqual(self.storage.attempts[1], 2)
+        self.assertEqual(self.storage.attempts[1], 1)
         self.assertEqual(self.storage.completed[1][0], "failed")
 
     def test_renamed_source_is_not_treated_as_new(self) -> None:

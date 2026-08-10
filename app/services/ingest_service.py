@@ -349,6 +349,34 @@ class IngestService:
                 error=str(exc),
                 finished_at=self._beijing_now(),
             )
+            self._remove_failed_upload(source_path=job.source_path, job_id=job_id)
+
+    def _remove_failed_upload(self, *, source_path: str, job_id: int) -> None:
+        upload_dir = self._upload_dir.resolve()
+        upload_path = (self._agent_root / source_path).resolve()
+        try:
+            upload_path.relative_to(upload_dir)
+        except ValueError:
+            LOGGER.error(
+                "Refusing to remove failed ingest source outside upload directory job_id=%s source_path=%s",
+                job_id,
+                source_path,
+            )
+            return
+
+        try:
+            upload_path.unlink()
+        except FileNotFoundError:
+            LOGGER.info("Failed ingest source was already removed job_id=%s source_path=%s", job_id, source_path)
+        except OSError:
+            LOGGER.warning(
+                "Failed to remove ingest source after job failure job_id=%s source_path=%s",
+                job_id,
+                source_path,
+                exc_info=True,
+            )
+        else:
+            LOGGER.info("Removed failed ingest source job_id=%s source_path=%s", job_id, source_path)
 
     def _ingest_source(self, source_path: Path, *, job_id: int) -> dict[str, Any]:
         source = source_path

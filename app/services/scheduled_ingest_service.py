@@ -248,65 +248,57 @@ class ScheduledIngestService:
         original_filename: str,
     ) -> bool:
         last_error: str | None = None
-        for attempt in range(2):
-            job_id: int | None = None
-            self._storage.record_scheduled_ingest_attempt(
-                source_id=record.source_id,
-                ingest_job_id=None,
-                attempted_at=self._now(),
+        job_id: int | None = None
+        self._storage.record_scheduled_ingest_attempt(
+            source_id=record.source_id,
+            ingest_job_id=None,
+            attempted_at=self._now(),
+        )
+        try:
+            LOGGER.info("Scheduled ingest submitting relative_path=%s", record.relative_path)
+            job = self._api_client.create_scheduled_job(
+                source_path=snapshot_path,
+                original_filename=original_filename,
             )
-            try:
-                LOGGER.info(
-                    "Scheduled ingest submitting relative_path=%s attempt=%s",
-                    record.relative_path,
-                    attempt + 1,
-                )
-                job = self._api_client.create_scheduled_job(
-                    source_path=snapshot_path,
-                    original_filename=original_filename,
-                )
-                job_id = job.job_id
-                LOGGER.info(
-                    "Scheduled ingest accepted relative_path=%s attempt=%s job_id=%s",
-                    record.relative_path,
-                    attempt + 1,
-                    job_id,
-                )
-                self._storage.set_scheduled_ingest_job(
+            job_id = job.job_id
+            LOGGER.info(
+                "Scheduled ingest accepted relative_path=%s job_id=%s",
+                record.relative_path,
+                job_id,
+            )
+            self._storage.set_scheduled_ingest_job(
+                source_id=record.source_id,
+                ingest_job_id=job_id,
+            )
+            completed_job = self._wait_for_terminal_job(job_id)
+            if completed_job.status == "succeeded":
+                self._storage.complete_scheduled_ingest_source(
                     source_id=record.source_id,
-                    ingest_job_id=job_id,
+                    state="succeeded",
+                    error=None,
+                    finished_at=self._now(),
                 )
-                completed_job = self._wait_for_terminal_job(job_id)
-                if completed_job.status == "succeeded":
-                    self._storage.complete_scheduled_ingest_source(
-                        source_id=record.source_id,
-                        state="succeeded",
-                        error=None,
-                        finished_at=self._now(),
-                    )
-                    LOGGER.info(
-                        "Scheduled ingest succeeded relative_path=%s job_id=%s",
-                        record.relative_path,
-                        job_id,
-                    )
-                    return True
-                last_error = completed_job.error or "ingest job failed"
-                LOGGER.warning(
-                    "Scheduled ingest job failed relative_path=%s attempt=%s job_id=%s error=%s",
+                LOGGER.info(
+                    "Scheduled ingest succeeded relative_path=%s job_id=%s",
                     record.relative_path,
-                    attempt + 1,
                     job_id,
-                    last_error,
                 )
-            except Exception as exc:
-                last_error = str(exc)
-                LOGGER.warning(
-                    "Scheduled ingest attempt failed relative_path=%s attempt=%s job_id=%s error=%s",
-                    record.relative_path,
-                    attempt + 1,
-                    job_id,
-                    last_error,
-                )
+                return True
+            last_error = completed_job.error or "ingest job failed"
+            LOGGER.warning(
+                "Scheduled ingest job failed relative_path=%s job_id=%s error=%s",
+                record.relative_path,
+                job_id,
+                last_error,
+            )
+        except Exception as exc:
+            last_error = str(exc)
+            LOGGER.warning(
+                "Scheduled ingest attempt failed relative_path=%s job_id=%s error=%s",
+                record.relative_path,
+                job_id,
+                last_error,
+            )
 
         safe_error = (last_error or "scheduled ingest failed")[:1000]
         self._storage.complete_scheduled_ingest_source(
@@ -315,7 +307,7 @@ class ScheduledIngestService:
             error=safe_error,
             finished_at=self._now(),
         )
-        LOGGER.error("Scheduled ingest failed permanently relative_path=%s error=%s", record.relative_path, safe_error)
+        LOGGER.error("Scheduled ingest failed relative_path=%s error=%s", record.relative_path, safe_error)
         return False
 
     def _wait_for_terminal_job(self, job_id: int) -> IngestJobResponse:

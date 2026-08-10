@@ -430,6 +430,7 @@ class IngestServiceTests(unittest.TestCase):
         self.assertNotIn(job.job_id, self.storage.succeeded)
         self.assertFalse((self.agent_root / "wiki" / "sources" / "report.md").exists())
         self.assertNotIn(("writing_wiki", 65), self.storage.progress_updates)
+        self.assertFalse((self.agent_root / job.source_path).exists())
 
     def test_low_quality_pdf_conversion_does_not_call_llm_or_write_wiki(self) -> None:
         upload = UploadFile(filename="report.pdf", file=io.BytesIO(b"%PDF-1.7"))

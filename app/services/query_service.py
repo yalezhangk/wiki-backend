@@ -30,6 +30,7 @@ DIRECTORY_KINDS = {
     "syntheses": "synthesis",
 }
 MAX_MODEL_SELECTED_PAGES = 10
+MAX_DIRECT_HIGH_CONFIDENCE_PAGES = 5
 PAGE_SELECTION_HISTORY_MESSAGE_LIMIT = 4
 PAGE_SELECTION_HISTORY_MAX_CHARS = 1200
 PAGE_SELECTION_HISTORY_MESSAGE_MAX_CHARS = 300
@@ -63,6 +64,44 @@ def resolve_wiki_page(wiki_dir: Path, value: str) -> Path | None:
     if not candidate.is_file():
         return None
     return candidate
+
+
+def is_high_confidence_title_match(question: str, title: str) -> bool:
+    """判断索引标题是否被问题完整提及，而不是仅命中宽泛关键词。"""
+    normalized_question = " ".join(question.casefold().split())
+    normalized_title = " ".join(title.casefold().split())
+    if not normalized_title:
+        return False
+
+    if re.fullmatch(r"[a-z0-9][a-z0-9\s._+/-]*", normalized_title):
+        escaped_title = re.escape(normalized_title).replace(r"\ ", r"\s+")
+        return re.search(
+            rf"(?<![a-z0-9]){escaped_title}(?![a-z0-9])",
+            normalized_question,
+        ) is not None
+
+    compact_question = re.sub(r"[\W_]+", "", normalized_question)
+    compact_title = re.sub(r"[\W_]+", "", normalized_title)
+    return len(compact_title) >= 2 and compact_title in compact_question
+
+
+def find_high_confidence_title_pages(
+    question: str,
+    index_content: str,
+    wiki_dir: Path,
+) -> list[Path]:
+    """返回问题中完整提及的安全知识页，不包含 overview 或图谱扩展页。"""
+    pages: list[Path] = []
+    for title, href in re.findall(r"\[([^\]]+)\]\(([^)]+)\)", index_content):
+        if not is_high_confidence_title_match(question, title):
+            continue
+        page = resolve_wiki_page(wiki_dir, href)
+        if page is None or not is_knowledge_page(wiki_dir=wiki_dir, path=page):
+            continue
+        if page.name == "overview.md" or page in pages:
+            continue
+        pages.append(page)
+    return pages
 
 
 def find_relevant_pages(question: str, index_content: str, wiki_dir: Path, graph_json: Path) -> list[Path]:
@@ -261,12 +300,24 @@ class QueryService:
         history_messages: Sequence[ChatMessageResponse] = (),
     ) -> list[Path]:
         relevant_pages = find_relevant_pages(question, index_content, self._wiki_dir, self._graph_json)
-        if relevant_pages and len(relevant_pages) > 1:
-            LOGGER.info(
-                "Wiki page selection completed strategy=keyword_graph relevant_pages=%s",
-                len(relevant_pages),
+        high_confidence_pages = find_high_confidence_title_pages(
+            question,
+            index_content,
+            self._wiki_dir,
+        )
+        if 0 < len(high_confidence_pages) <= MAX_DIRECT_HIGH_CONFIDENCE_PAGES:
+            overview = self._wiki_dir / "overview.md"
+            selected_pages = (
+                [overview, *high_confidence_pages]
+                if is_knowledge_page(wiki_dir=self._wiki_dir, path=overview)
+                else high_confidence_pages
             )
-            return relevant_pages
+            LOGGER.info(
+                "Wiki page selection completed strategy=high_confidence_title "
+                "selected_pages=%s",
+                len(selected_pages),
+            )
+            return selected_pages
 
         selection_started_at = time.monotonic()
         LOGGER.info(

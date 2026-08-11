@@ -89,8 +89,8 @@ class ModelProfileServiceTests(unittest.TestCase):
 
         self.assertEqual(direct.llm_profile.reasoning_effort, "none")
         self.assertEqual(thinking.llm_profile.reasoning_effort, "low")
-        self.assertGreaterEqual(direct.llm_profile.max_tokens, 512)
-        self.assertGreaterEqual(thinking.llm_profile.max_tokens, 512)
+        self.assertEqual(direct.llm_profile.max_tokens, 1024)
+        self.assertEqual(thinking.llm_profile.max_tokens, 2048)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,8 @@ LOGGER = logging.getLogger(__name__)
 MODEL_PROFILE_AVAILABILITY_CACHE_SECONDS = 60
 DEEPSEEK_MAX_TOKENS = 8192
 DEEPSEEK_TEMPERATURE = 0.2
-LOCAL_QWEN_MAX_TOKENS = 512
+LOCAL_QWEN_DIRECT_MAX_TOKENS = 1024
+LOCAL_QWEN_THINKING_MAX_TOKENS = 2048
 LOCAL_QWEN_TEMPERATURE = 0.2
 
 
@@ -181,7 +182,7 @@ class ModelProfileService:
                     api_base=settings.ollama_api_base
                     or settings.legacy_llm_api_base
                     or "http://127.0.0.1:11434",
-                    max_tokens=LOCAL_QWEN_MAX_TOKENS,
+                    max_tokens=LOCAL_QWEN_DIRECT_MAX_TOKENS,
                     temperature=LOCAL_QWEN_TEMPERATURE,
                     reasoning_effort="none",
                 ),
@@ -199,7 +200,7 @@ class ModelProfileService:
                     api_base=settings.ollama_api_base
                     or settings.legacy_llm_api_base
                     or "http://127.0.0.1:11434",
-                    max_tokens=LOCAL_QWEN_MAX_TOKENS,
+                    max_tokens=LOCAL_QWEN_THINKING_MAX_TOKENS,
                     temperature=LOCAL_QWEN_TEMPERATURE,
                     reasoning_effort="low",
                 ),

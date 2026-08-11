@@ -320,6 +320,53 @@ class QueryServiceTests(unittest.TestCase):
 
         self.assertEqual(observed_max_tokens, [768])
 
+    def test_exact_title_match_skips_model_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wiki = root / "wiki"
+            entities = wiki / "entities"
+            entities.mkdir(parents=True)
+            overview = wiki / "overview.md"
+            overview.write_text("# Overview", encoding="utf-8")
+            pix = entities / "PIX.md"
+            pix.write_text("# PIX", encoding="utf-8")
+            service = QueryService(root)
+
+            def fail_if_called(prompt: str, max_tokens: int | None = None) -> str:
+                raise AssertionError("exact title match should not call the model selector")
+
+            service._call_llm_fast = fail_if_called
+            selected_pages = service._select_relevant_pages(
+                "PIX 有哪些主要特点？",
+                "# Index\n\n- [PIX](entities/PIX.md)",
+            )
+
+        self.assertEqual(selected_pages, [overview, pix])
+
+    def test_fuzzy_title_match_uses_model_selector_despite_overview(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wiki = root / "wiki"
+            concepts = wiki / "concepts"
+            concepts.mkdir(parents=True)
+            (wiki / "overview.md").write_text("# Overview", encoding="utf-8")
+            gas_page = concepts / "GasSwitchgear.md"
+            gas_page.write_text("# Gas switchgear", encoding="utf-8")
+            prompts: list[str] = []
+            service = QueryService(root)
+            service._call_llm_fast = lambda prompt, max_tokens=None: (
+                prompts.append(prompt) or '["concepts/GasSwitchgear.md"]'
+            )
+            service._call_llm_main = lambda prompt, max_tokens=None: "answer"
+
+            selected_pages = service._select_relevant_pages(
+                "气体设备如何维护？",
+                "# Index\n\n- [气体绝缘开关柜产品目录](concepts/GasSwitchgear.md)",
+            )
+
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(selected_pages, [gas_page])
+
     def test_model_page_selection_caps_valid_deduplicated_pages_at_ten(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

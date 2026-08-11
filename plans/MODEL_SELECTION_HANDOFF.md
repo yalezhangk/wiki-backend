@@ -31,7 +31,7 @@
 - 对此版本 LiteLLM，profile 不应直接向 `completion(...)` 传 `think`。其 Ollama Chat 适配器将标准参数 `reasoning_effort` 映射到发送给 `POST /api/chat` 的顶层 `think`：`"none"` 映射为 `false`，`"low"`、`"medium"`、`"high"` 映射为 `true`。
 - 当前两个本地 profile 的后端内部配置固定为：`local-qwen3.6-35b-direct -> reasoning_effort="none"`，`local-qwen3.6-35b-thinking -> reasoning_effort="low"`。只有本地 Qwen profile 传此参数；DeepSeek profile 不传。
 - 实机请求已证明两种模式都能产生最终答案：direct 返回 `reasoning_chars=0`；thinking 返回 `reasoning_chars=1602` 且同时返回最终 `content`，两者的 `finish_reason` 都是 `"stop"`。这证明 LiteLLM、当前 Ollama 和模型 tag 的组合可用。
-- 先前以 `max_tokens=64` 测试 thinking 时只有 reasoning、没有最终 `content`。因此 thinking profile 的输出上限不得低于已验证可返回最终答案的 `512`；上线前仍要结合质量、延迟和成本实测确定最终值。
+- 先前以 `max_tokens=64` 测试 thinking 时只有 reasoning、没有最终 `content`。当前服务端固定 Direct profile 为 `1024`、Thinking profile 为 `2048`，避免两种模式共用过低的输出上限；上线后仍要结合截断率、质量、延迟和成本实测调整。
 - 单次总耗时不能决定默认 profile：已观测到 direct 从约 `4.10s` 到 `56.44s` 的波动，thinking 一次为 `38.63s`。模型冷启动/驻留、GPU 排队及系统负载都会影响结果。后续性能试验必须先预热，再交替各运行至少 3 次，以中位数决策，并记录首 token、总耗时、prompt/eval tokens、tokens/s 和 GPU/CPU offload。
 
 实现后必须保留两类验证：

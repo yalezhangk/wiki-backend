@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.publish import PublicationResponse
 
@@ -38,7 +38,7 @@ class IngestGeneratedPage(BaseModel):
 class IngestLLMResult(BaseModel):
     ingest_status: Literal["succeeded"]
     ingest_error: None
-    title: str
+    title: str = Field(min_length=1, max_length=200)
     slug: str
     source_page: str
     index_entry: str
@@ -47,6 +47,14 @@ class IngestLLMResult(BaseModel):
     concept_pages: list[IngestGeneratedPage] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
     log_entry: str
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("title cannot be blank")
+        return normalized
 
 
 class IngestLLMFailure(BaseModel):
@@ -65,6 +73,14 @@ class IngestJobResponse(BaseModel):
         description="任务来源；manual 表示人工上传，scheduled 表示 DGX 定时同步。",
     )
     source_path: str = Field(description="相对于 agent 仓库根目录的上传源文件路径。")
+    document_name_key: str | None = Field(
+        default=None,
+        description="后端生成的全局文档主名唯一键；失败任务会释放该键。",
+    )
+    source_url: str | None = Field(
+        default=None,
+        description="scheduled 任务对应的 http/https 原始文档 URL；manual 任务恒为 null。",
+    )
     created_pages: list[str] = Field(
         default_factory=list,
         description="本任务创建的 Wiki 根目录相对路径列表。",

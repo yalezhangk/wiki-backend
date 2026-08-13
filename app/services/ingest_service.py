@@ -7,7 +7,6 @@ import shutil
 import subprocess
 import threading
 import time
-import uuid
 import zipfile
 from datetime import date, datetime
 from pathlib import Path
@@ -16,7 +15,7 @@ from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Any, Callable, Protocol
 
 from fastapi import UploadFile
-from pydantic import ValidationError
+from pydantic import HttpUrl, TypeAdapter, ValidationError
 
 from app.config import settings
 from app.llm_config import LLMConfigError, LLMResponseTruncatedError, call_llm_main
@@ -29,7 +28,9 @@ from app.schemas.ingest import (
     IngestValidation,
 )
 from app.services.publish_service import PublishService
+from app.services.ingest_document_name import normalize_document_name
 from app.services.wiki_page_policy import iter_knowledge_pages
+from app.storage.mysql import DuplicateDocumentNameError
 from app.time_utils import beijing_now
 
 LOGGER = logging.getLogger(__name__)
@@ -191,6 +192,8 @@ class IngestStorage(Protocol):
         stored_filename: str,
         source_path: str,
         trigger: IngestTrigger,
+        document_name_key: str,
+        source_url: str | None,
         created_at: datetime,
     ) -> IngestJobResponse:
         ...
@@ -227,6 +230,9 @@ class IngestStorage(Protocol):
         ...
 
     def mark_ingest_job_failed(self, *, job_id: int, error: str, finished_at: datetime) -> None:
+        ...
+
+    def find_legacy_scheduled_document_name_conflict(self, document_name_key: str) -> bool:
         ...
 
 
@@ -267,6 +273,7 @@ class IngestService:
         file: UploadFile,
         auto_convert: bool = True,
         trigger: IngestTrigger = "manual",
+        source_url: str | None = None,
     ) -> IngestJobResponse:
         original_filename = Path(file.filename or "").name
         if not original_filename:
@@ -278,28 +285,39 @@ class IngestService:
         if suffix != ".md" and not auto_convert:
             raise IngestValidationError(f"non-markdown file requires auto_convert: {suffix}")
 
+        normalized_source_url = self._validate_source_url(trigger=trigger, source_url=source_url)
+        document_name_key = normalize_document_name(original_filename)
+        if not document_name_key:
+            raise IngestValidationError("filename stem cannot be empty")
+        if self._storage.find_legacy_scheduled_document_name_conflict(document_name_key):
+            raise IngestConflictError(self._document_name_conflict_message(document_name_key))
+
         stored_filename = self._safe_filename(original_filename)
-        if trigger == "scheduled":
-            stored_filename = self._scheduled_stored_filename(stored_filename)
-        relative_source_path = Path("raw") / "uploads" / stored_filename
+        relative_source_path = Path("raw") / "uploads" / trigger / stored_filename
         target_path = self._agent_root / relative_source_path
         if target_path.exists():
             raise IngestConflictError(
                 f"上传文件已存在，请修改文件名后重试: {relative_source_path.as_posix()}"
             )
 
-        self._upload_dir.mkdir(parents=True, exist_ok=True)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
         await self._save_upload(file=file, target_path=target_path, suffix=suffix)
 
         created_at = self._beijing_now()
-        job = self._storage.create_ingest_job(
-            status="queued",
-            original_filename=original_filename,
-            stored_filename=stored_filename,
-            source_path=relative_source_path.as_posix(),
-            trigger=trigger,
-            created_at=created_at,
-        )
+        try:
+            job = self._storage.create_ingest_job(
+                status="queued",
+                original_filename=original_filename,
+                stored_filename=stored_filename,
+                source_path=relative_source_path.as_posix(),
+                trigger=trigger,
+                document_name_key=document_name_key,
+                source_url=normalized_source_url,
+                created_at=created_at,
+            )
+        except DuplicateDocumentNameError as exc:
+            target_path.unlink(missing_ok=True)
+            raise IngestConflictError(self._document_name_conflict_message(document_name_key)) from exc
         self._queue.put(job.job_id)
         return job
 
@@ -328,7 +346,7 @@ class IngestService:
         started_at = self._beijing_now()
         self._storage.mark_ingest_job_running(job_id, started_at)
         try:
-            result = self._ingest_source(self._agent_root / job.source_path, job_id=job_id)
+            result = self._ingest_source(job=job)
             self._storage.mark_ingest_job_succeeded(
                 job_id=job_id,
                 created_pages=result["created_pages"],
@@ -378,7 +396,9 @@ class IngestService:
         else:
             LOGGER.info("Removed failed ingest source job_id=%s source_path=%s", job_id, source_path)
 
-    def _ingest_source(self, source_path: Path, *, job_id: int) -> dict[str, Any]:
+    def _ingest_source(self, *, job: IngestJobResponse) -> dict[str, Any]:
+        source_path = self._agent_root / job.source_path
+        job_id = job.job_id
         source = source_path
         pdf_ocr_attempted = False
         if source_path.suffix.lower() != ".md":
@@ -476,7 +496,7 @@ class IngestService:
 
         self._update_progress(job_id, "writing_wiki", 65)
         with self._wiki_lock:
-            created_pages, updated_pages, changed_knowledge_pages = self._write_ingest_result(data)
+            created_pages, updated_pages, changed_knowledge_pages = self._write_ingest_result(job, data)
         self._update_progress(job_id, "validating", 85)
         validation = self._validate_ingest(changed_knowledge_pages)
 
@@ -580,12 +600,29 @@ class IngestService:
             )
             raise IngestLLMInvalidJSONError() from retry_error
 
-    def _write_ingest_result(self, data: IngestLLMResult) -> tuple[list[str], list[str], list[str]]:
+    def _write_ingest_result(
+        self,
+        job: IngestJobResponse,
+        data: IngestLLMResult,
+    ) -> tuple[list[str], list[str], list[str]]:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", data.slug):
             raise IngestServiceError(f"invalid generated source slug: {data.slug}")
 
         source_path = f"sources/{data.slug}.md"
-        generated_pages = [(source_path, data.source_page)]
+        source_file = self._wiki_dir / source_path
+        if source_file.exists():
+            raise IngestConflictError(f"Source 页面已存在，不能覆盖: {source_path}")
+        generated_pages = [
+            (
+                source_path,
+                self._correct_source_frontmatter(
+                    job,
+                    data.source_page,
+                    result_slug=data.slug,
+                    result_title=data.title,
+                ),
+            )
+        ]
 
         for page in data.entity_pages:
             self._assert_allowed_wiki_output(page.path, "entities")
@@ -1042,9 +1079,98 @@ class IngestService:
         return call_llm_main
 
     @staticmethod
-    def _scheduled_stored_filename(value: str) -> str:
-        path = Path(value)
-        return f"{path.stem}-{uuid.uuid4().hex}{path.suffix}"
+    def _document_name_conflict_message(document_name_key: str) -> str:
+        return f"文档名称已存在，不能重复入库：{document_name_key}"
+
+    @staticmethod
+    def _validate_source_url(*, trigger: IngestTrigger, source_url: str | None) -> str | None:
+        normalized = source_url.strip() if source_url else None
+        if trigger == "manual":
+            if normalized:
+                raise IngestValidationError("source_url is only allowed for scheduled ingest")
+            return None
+        if not normalized:
+            raise IngestValidationError("source_url is required for scheduled ingest")
+        try:
+            TypeAdapter(HttpUrl).validate_python(normalized)
+        except ValidationError as exc:
+            raise IngestValidationError("source_url must be an http/https URL") from exc
+        return normalized
+
+    @staticmethod
+    def _correct_source_frontmatter(
+        job: IngestJobResponse,
+        content: str,
+        *,
+        result_slug: str,
+        result_title: str,
+    ) -> str:
+        frontmatter = re.match(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", content, re.DOTALL)
+        has_frontmatter = frontmatter is not None
+        if frontmatter is None:
+            metadata: list[str] = []
+            body = content
+        else:
+            metadata = frontmatter.group(1).splitlines()
+            body = content[frontmatter.end() :]
+        metadata = [line for line in metadata if line.strip()]
+        has_title = any(IngestService._has_frontmatter_title(line) for line in metadata)
+        has_type = any(re.match(r"^type\s*:\s*source\s*$", line, re.IGNORECASE) for line in metadata)
+        has_tags = any(re.match(r"^tags\s*:", line, re.IGNORECASE) for line in metadata)
+        has_date = any(re.match(r"^date\s*:", line, re.IGNORECASE) for line in metadata)
+        LOGGER.info(
+            "Ingest source page diagnostic job_id=%s slug=%s source_page_has_frontmatter=%s "
+            "source_page_has_title=%s source_page_has_type=%s source_page_has_tags=%s "
+            "source_page_has_date=%s result_title=%r",
+            job.job_id,
+            result_slug,
+            has_frontmatter,
+            has_title,
+            has_type,
+            has_tags,
+            has_date,
+            result_title,
+        )
+        tags_line = next((line for line in metadata if re.match(r"^tags\s*:", line, re.IGNORECASE)), "tags: []")
+        date_line = next(
+            (line for line in metadata if re.match(r"^date\s*:", line, re.IGNORECASE)),
+            f"date: {job.created_at.date().isoformat()}",
+        )
+        metadata = [
+            line
+            for line in metadata
+            if not re.match(r"^(?:title|type|tags|date|source_file|source_url)\s*:", line, re.IGNORECASE)
+        ]
+        metadata = [
+            f"title: {json.dumps(result_title, ensure_ascii=False)}",
+            "type: source",
+            tags_line,
+            date_line,
+            *metadata,
+        ]
+        if not (has_title and has_type and has_tags and has_date):
+            LOGGER.warning(
+                "Ingest source page Frontmatter was incomplete; applied canonical source Frontmatter job_id=%s slug=%s",
+                job.job_id,
+                result_slug,
+            )
+        if job.trigger == "manual":
+            metadata.append(f"source_file: {job.source_path}")
+        else:
+            if job.source_url is None:
+                raise IngestServiceError("scheduled ingest job has no source_url")
+            escaped_url = job.source_url.replace('"', '\\"')
+            metadata.append(f'source_url: "{escaped_url}"')
+        metadata_content = "\n".join(metadata)
+        return f"---\n{metadata_content}\n---\n{body.lstrip(chr(10) + chr(13))}"
+
+    @staticmethod
+    def _has_frontmatter_title(line: str) -> bool:
+        match = re.match(r"^title\s*:\s*(.*)$", line, re.IGNORECASE)
+        if match is None:
+            return False
+        value = match.group(1).strip()
+        return value.strip("\"'").strip() != ""
 
     @staticmethod
     def _safe_filename(value: str) -> str:

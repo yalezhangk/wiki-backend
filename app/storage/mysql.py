@@ -33,6 +33,10 @@ class StorageUnavailableError(StorageError):
     """Raised when MySQL is unavailable or misconfigured."""
 
 
+class DuplicateDocumentNameError(StorageError):
+    """Raised when the global ingest document name key is already occupied."""
+
+
 @dataclass(frozen=True)
 class ScheduledIngestSource:
     source_id: int
@@ -107,6 +111,8 @@ class MySQLStorage:
                         original_filename VARCHAR(255) NOT NULL,
                         stored_filename VARCHAR(255) NOT NULL,
                         source_path VARCHAR(500) NOT NULL,
+                        document_name_key VARCHAR(255) NULL,
+                        source_url VARCHAR(2048) NULL,
                         created_pages JSON NOT NULL,
                         updated_pages JSON NOT NULL,
                         contradictions JSON NOT NULL,
@@ -115,7 +121,8 @@ class MySQLStorage:
                         created_at DATETIME NOT NULL,
                         started_at DATETIME NULL,
                         updated_at DATETIME NOT NULL,
-                        finished_at DATETIME NULL
+                        finished_at DATETIME NULL,
+                        UNIQUE KEY uq_ingest_document_name_key (document_name_key)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """
                 )
@@ -229,6 +236,7 @@ class MySQLStorage:
                 )
                 self._ensure_ingest_progress_columns(cursor)
                 self._ensure_ingest_trigger_column(cursor)
+                self._ensure_ingest_source_origin_columns(cursor)
                 self._ensure_message_citations_column(cursor)
                 self._ensure_message_model_profile_columns(cursor)
                 self._apply_schema_comments(cursor)
@@ -562,42 +570,73 @@ class MySQLStorage:
         stored_filename: str,
         source_path: str,
         trigger: IngestTrigger = "manual",
+        document_name_key: str | None = None,
+        source_url: str | None = None,
         created_at: datetime,
     ) -> IngestJobResponse:
         empty_array = json.dumps([], ensure_ascii=False)
         empty_validation = json.dumps({"broken_links": [], "unindexed": []}, ensure_ascii=False)
+        pymysql = self._import_pymysql()
         with self.connect() as connection:
             with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO ingest_jobs (
-                        status, stage, progress_percent, `trigger`,
-                        original_filename, stored_filename, source_path,
-                        created_pages, updated_pages, contradictions, validation,
-                        error, created_at, started_at, updated_at, finished_at
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO ingest_jobs (
+                            status, stage, progress_percent, `trigger`,
+                            original_filename, stored_filename, source_path,
+                            document_name_key, source_url,
+                            created_pages, updated_pages, contradictions, validation,
+                            error, created_at, started_at, updated_at, finished_at
+                        )
+                        VALUES (%s, 'uploaded', 0, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NULL, %s, NULL)
+                        """,
+                        (
+                            status,
+                            trigger,
+                            original_filename,
+                            stored_filename,
+                            source_path,
+                            document_name_key,
+                            source_url,
+                            empty_array,
+                            empty_array,
+                            empty_array,
+                            empty_validation,
+                            created_at,
+                            created_at,
+                        ),
                     )
-                    VALUES (%s, 'uploaded', 0, %s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NULL, %s, NULL)
-                    """,
-                    (
-                        status,
-                        trigger,
-                        original_filename,
-                        stored_filename,
-                        source_path,
-                        empty_array,
-                        empty_array,
-                        empty_array,
-                        empty_validation,
-                        created_at,
-                        created_at,
-                    ),
-                )
+                except pymysql.err.IntegrityError as exc:
+                    if exc.args and exc.args[0] == 1062:
+                        raise DuplicateDocumentNameError("ingest document name is already occupied") from exc
+                    raise
                 job_id = int(cursor.lastrowid)
                 cursor.execute("SELECT * FROM ingest_jobs WHERE id = %s", (job_id,))
                 row = cursor.fetchone()
         if row is None:
             raise StorageError("Failed to reload created ingest job.")
         return self._ingest_job_from_row(row)
+
+    def find_legacy_scheduled_document_name_conflict(self, document_name_key: str) -> bool:
+        from app.services.ingest_document_name import normalize_document_name
+
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT original_filename
+                    FROM ingest_jobs
+                    WHERE `trigger` = 'scheduled'
+                      AND document_name_key IS NULL
+                      AND status <> 'failed'
+                    """
+                )
+                rows = cursor.fetchall()
+        return any(
+            normalize_document_name(str(row["original_filename"])) == document_name_key
+            for row in rows
+        )
 
     def claim_scheduled_ingest_source(
         self,
@@ -855,7 +894,7 @@ class MySQLStorage:
         self._execute_update(
             """
             UPDATE ingest_jobs
-            SET status = 'failed', error = %s, updated_at = %s, finished_at = %s
+            SET status = 'failed', document_name_key = NULL, error = %s, updated_at = %s, finished_at = %s
             WHERE id = %s
             """,
             (error, finished_at, finished_at, job_id),
@@ -1517,6 +1556,40 @@ class MySQLStorage:
             )
 
     @staticmethod
+    def _ensure_ingest_source_origin_columns(cursor: Any) -> None:
+        cursor.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'ingest_jobs'
+              AND COLUMN_NAME IN ('document_name_key', 'source_url')
+            """
+        )
+        existing = {row["COLUMN_NAME"] for row in cursor.fetchall()}
+        if "document_name_key" not in existing:
+            cursor.execute(
+                "ALTER TABLE ingest_jobs ADD COLUMN document_name_key VARCHAR(255) NULL AFTER source_path"
+            )
+        if "source_url" not in existing:
+            cursor.execute(
+                "ALTER TABLE ingest_jobs ADD COLUMN source_url VARCHAR(2048) NULL AFTER document_name_key"
+            )
+        cursor.execute(
+            """
+            SELECT INDEX_NAME
+            FROM information_schema.STATISTICS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'ingest_jobs'
+              AND INDEX_NAME = 'uq_ingest_document_name_key'
+            """
+        )
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "ALTER TABLE ingest_jobs ADD UNIQUE KEY uq_ingest_document_name_key (document_name_key)"
+            )
+
+    @staticmethod
     def _scheduled_ingest_source_key(source_root: str, relative_path: str) -> str:
         payload = f"{source_root}\x00{relative_path}".encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
@@ -1875,6 +1948,8 @@ class MySQLStorage:
             original_filename=str(row["original_filename"]),
             trigger=row.get("trigger", "manual"),
             source_path=str(row["source_path"]),
+            document_name_key=row.get("document_name_key"),
+            source_url=row.get("source_url"),
             created_pages=self._parse_json_field(row.get("created_pages")),
             updated_pages=self._parse_json_field(row.get("updated_pages")),
             contradictions=self._parse_json_field(row.get("contradictions")),

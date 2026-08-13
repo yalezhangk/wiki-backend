@@ -49,6 +49,7 @@ ECS Nginx :8080
 - `app/logging_config.py`：应用和 Uvicorn 日志配置。
 - `app/scheduled_ingest.py`：通过本机 Ingest API 执行每日增量 Markdown 同步的命令入口。
 - `tools/migrate_uuid_primary_keys.py`：显式执行的历史 UUID 主键迁移工具，不在服务启动时自动运行。
+- `tools/migrate_ingest_source_origins.py`：默认 dry-run 的 manual-only 原始来源迁移工具；禁止用于 scheduled 历史数据。
 - `tests/`：API、服务、启动、日志和 MySQL 集成测试。
 
 ## Python 规则
@@ -192,6 +193,8 @@ WIKI_BACKEND_RUN_MYSQL_INTEGRATION=1 \
 - `POST /api/query` 是无状态问答，不应隐式创建 chat。
 - chat API 会写 MySQL，测试时优先使用 fake storage。
 - ingest 会创建任务、写入 `llm-wiki-agent` 知识库；成功后会加入 Quartz 发布队列，失败后会删除该任务记录的上传源文件。
+- 新 manual/scheduled 文件分别落在 `raw/uploads/manual/` 与 `raw/uploads/scheduled/`；二者共享全局文件主名唯一键。scheduled 必须保存 `source_url`，旧 scheduled 仅可只读参与名称冲突检查。
+- Source 页面写入前必须由后端修正来源字段：manual 只保留 `source_file`，scheduled 只保留 `source_url`，且不得覆盖既有 Source slug。
 - synthesis 会写 Wiki Markdown、更新消息 synthesis 状态，并在成功后加入 Quartz 发布队列。
 - publish 会启动 Quartz 构建子进程，并写入 `quartz/.publish`、切换 `quartz/public` 链接。
 - maintenance 会写 MySQL；除 `health` 且 `save_report=false` 外，还会写 Wiki 或 graph 运行产物，但不会自动发布 Quartz。

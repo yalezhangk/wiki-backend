@@ -23,6 +23,9 @@ Or use shorthand triggers:
 
 ```
 raw/          # Immutable source documents — never modify these
+  uploads/    # backend-managed ingest inputs; created on demand, not committed
+    manual/   # UI-uploaded original files and optional conversion work files
+    scheduled/ # scheduler-submitted parsed Markdown files only
 wiki/         # Agent owns this layer entirely
   index.md    # Catalog of all pages — update on every ingest
   log.md      # Newest-first chronological record
@@ -37,6 +40,25 @@ tools/        # Standalone Python scripts
   lint.py     # Content quality checks (uses LLM for semantic analysis)
   build_graph.py  # Knowledge graph generation
 ```
+
+### Raw Upload Source Contract
+
+`raw/uploads/` is the shared ingest boundary for the backend and Quartz. The
+backend creates these runtime directories as needed; this repository does not
+migrate existing files or commit runtime uploads.
+
+- `raw/uploads/manual/` contains the file uploaded through the UI (for example,
+  a PDF, DOCX, or Markdown file). A converted Markdown file may be kept there
+  as an ingest work file, but it is not the user-facing original source.
+- `raw/uploads/scheduled/` contains only the parsed `A.md` submitted by a
+  scheduler. Its neighbouring external-source metadata, such as `readme.txt`,
+  HTML, images, and videos, must not be copied into this repository.
+- Manual and scheduled documents share one global document-name namespace. The
+  backend performs that duplicate check before creating an ingest task; this
+  repository does not implement a second deduplication rule.
+- Historical scheduled files and Source pages remain unchanged. Do not move
+  them, add `source_url`, or delete or merge Source pages as part of this
+  contract sync.
 
 ---
 
@@ -78,13 +100,55 @@ Steps (in order):
 
 ### Source Page Format
 
+Choose exactly one source-origin field according to the ingest trigger:
+
+| Trigger | Required field | Prohibited field | Meaning |
+|---|---|---|---|
+| manual | `source_file` | `source_url` | Path to the uploaded original file under `raw/uploads/manual/` |
+| scheduled | `source_url` | `source_file` | `http://` or `https://` URL read from the scheduler-side `readme.txt` `Source URL:` line |
+
+Do not use the Markdown conversion work file as a manual `source_file`. For a
+scheduled source, `raw/uploads/scheduled/A.md` remains an ingest input tracked
+by the backend, not a user-facing original document.
+
+#### Manual Source Template
+
 ```markdown
 ---
 title: "Source Title"
 type: source
 tags: []
 date: YYYY-MM-DD
-source_file: raw/...
+source_file: raw/uploads/manual/report.pdf
+---
+
+## Summary
+2–4 sentence summary.
+
+## Key Claims
+- Claim 1
+- Claim 2
+
+## Key Quotes
+> "Quote here" — context
+
+## Connections
+- [[EntityName]] — how they relate
+- [[ConceptName]] — how it connects
+
+## Contradictions
+- Contradicts [[OtherPage]] on: ...
+```
+
+#### Scheduled Source Template
+
+```markdown
+---
+title: "Source Title"
+type: source
+tags: []
+date: YYYY-MM-DD
+source_url: "https://example.com/article"
 ---
 
 ## Summary

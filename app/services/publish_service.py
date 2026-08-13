@@ -181,6 +181,7 @@ class PublishService:
     def _build(self, *, snapshot_dir: Path, release_dir: Path) -> None:
         environment = os.environ.copy()
         environment["CHAT_PROXY_URL"] = "/api"
+        environment["WIKI_SOURCE_ROOT"] = str(self._wiki_dir.parent)
         command = [
             self._node_executable,
             "quartz/bootstrap-cli.mjs",

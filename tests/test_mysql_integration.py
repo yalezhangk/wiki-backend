@@ -13,7 +13,7 @@ from app.schemas.ingest import IngestValidation
 from app.schemas.query import CitationResponse, QueryResult
 from app.services.chat_service import ChatService
 from app.services.chat_turn_service import ChatTurnService
-from app.storage.mysql import MySQLStorage
+from app.storage.mysql import DuplicateDocumentNameError, MySQLStorage
 
 
 class StubQueryService:
@@ -247,6 +247,64 @@ class MySQLIntegrationTests(unittest.TestCase):
         self.assertEqual(columns["stage"]["COLUMN_DEFAULT"], "uploaded")
         self.assertEqual(str(columns["progress_percent"]["COLUMN_DEFAULT"]), "0")
         self.assertEqual(columns["updated_at"]["IS_NULLABLE"], "NO")
+
+    def test_ingest_jobs_has_source_origin_columns_and_unique_name_key(self) -> None:
+        with self.storage.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = %s
+                      AND TABLE_NAME = 'ingest_jobs'
+                      AND COLUMN_NAME IN ('document_name_key', 'source_url')
+                    """,
+                    (settings.mysql_database,),
+                )
+                columns = {row["COLUMN_NAME"]: row for row in cursor.fetchall()}
+                cursor.execute(
+                    """
+                    SELECT NON_UNIQUE
+                    FROM information_schema.STATISTICS
+                    WHERE TABLE_SCHEMA = %s
+                      AND TABLE_NAME = 'ingest_jobs'
+                      AND INDEX_NAME = 'uq_ingest_document_name_key'
+                    """,
+                    (settings.mysql_database,),
+                )
+                index = cursor.fetchone()
+
+        self.assertEqual(set(columns), {"document_name_key", "source_url"})
+        self.assertEqual(columns["document_name_key"]["COLUMN_TYPE"], "varchar(255)")
+        self.assertEqual(columns["source_url"]["COLUMN_TYPE"], "varchar(2048)")
+        self.assertTrue(all(column["IS_NULLABLE"] == "YES" for column in columns.values()))
+        self.assertIsNotNone(index)
+        assert index is not None
+        self.assertEqual(index["NON_UNIQUE"], 0)
+
+    def test_ingest_document_name_unique_constraint_rejects_second_active_job(self) -> None:
+        created_at = datetime(2026, 8, 12, 10, 0, 0)
+        first = self.storage.create_ingest_job(
+            status="queued",
+            original_filename="unique.md",
+            stored_filename="unique.md",
+            source_path="raw/uploads/manual/unique.md",
+            document_name_key="integration-unique-name",
+            created_at=created_at,
+        )
+        self.created_ingest_job_ids.append(first.job_id)
+
+        with self.assertRaises(DuplicateDocumentNameError):
+            self.storage.create_ingest_job(
+                status="queued",
+                original_filename="unique.txt",
+                stored_filename="unique.txt",
+                source_path="raw/uploads/scheduled/unique.txt",
+                trigger="scheduled",
+                document_name_key="integration-unique-name",
+                source_url="https://example.com/unique",
+                created_at=created_at,
+            )
 
     def test_numeric_primary_keys_and_references_have_expected_types(self) -> None:
         expected = {

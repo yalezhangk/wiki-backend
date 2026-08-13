@@ -28,6 +28,16 @@ def get_ingest_service(request: Request) -> IngestService:
     "",
     response_model=IngestJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        409: {
+            "description": "文档主名已被未失败的 Ingest 任务占用。",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "文档名称已存在，不能重复入库：report"}
+                }
+            },
+        }
+    },
     summary="创建 Ingest 导入任务",
     description=(
         "上传一个知识源文件，并创建异步 Ingest 任务。"
@@ -40,6 +50,8 @@ def get_ingest_service(request: Request) -> IngestService:
         "\n"
         "- `trigger` 默认为 `manual`；DGX 本机定时同步使用 `scheduled`"
         "\n"
+        "- `source_url` 仅供 `scheduled` 使用且必须是 http/https URL；`manual` 不得提供该字段"
+        "\n"
         "- 服务端按 `WIKI_BACKEND_INGEST_MAX_UPLOAD_BYTES` 限制大小，并校验声明类型和关键文件签名"
         "\n"
         "- 返回 `202 Accepted` 表示任务已入队，不表示 Wiki 写入已经完成"
@@ -49,6 +61,7 @@ async def create_ingest_job(
     file: UploadFile = File(...),
     auto_convert: bool = Form(default=True),
     trigger: IngestTrigger = Form(default="manual"),
+    source_url: str | None = Form(default=None),
     ingest_service: IngestService = Depends(get_ingest_service),
 ) -> IngestJobResponse:
     """保存上传文件，创建 Ingest 任务，并返回初始任务状态。"""
@@ -58,6 +71,7 @@ async def create_ingest_job(
             file=file,
             auto_convert=auto_convert,
             trigger=trigger,
+            source_url=source_url,
         )
     except IngestValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

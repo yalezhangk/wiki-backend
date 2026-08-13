@@ -64,6 +64,9 @@
 - chat、message 和 ingest job 的外部 ID 为数据库数值主键；跨阶段关联使用独立 workflow UUID。
 - API 时间字段使用带 `+08:00` 的北京时间。
 - Ingest 会校验文件名、类型、大小和落盘路径；任务详情包含当前阶段和进度。
+- 新建 Ingest 任务以文件主名的 NFKC、空白归一化和大小写折叠结果进行全局去重；manual 与 scheduled 同名会返回 `409 Conflict`，失败任务会释放名称。
+- 新 manual 文件保存到 `raw/uploads/manual/`；新 scheduled Markdown 保存到 `raw/uploads/scheduled/`。scheduled 必须提交 `source_url`，manual 不得提交该字段。
+- Source 页面由后端在写入前确定来源：manual 写 `source_file: raw/uploads/manual/<原文件>`，scheduled 只写 `source_url: "https://..."`；已存在的 Source slug 不会被覆盖。
 - 查询引用由服务端解析为结构化 `sources`；正文中的引用标记与 `sources` 顺序对应。
 - Synthesis 写入 Wiki Markdown，并更新消息的 synthesis 状态。
 - Ingest 和 synthesis 的业务成功不等同于 Quartz 发布成功；发布状态需单独检查。
@@ -128,6 +131,17 @@ FLUSH PRIVILEGES;
 ```
 
 生产环境不要使用 MySQL `root` 运行应用。历史库主键迁移属于一次性高风险操作，执行前应备份并阅读对应迁移工具的 `--help`，不在日常启动流程中运行。
+
+### 历史 manual 来源迁移
+
+`tools/migrate_ingest_source_origins.py` 只查询和更新 `ingest_jobs.trigger='manual'`。默认 dry-run 会列出每个 manual 任务的旧/新路径、Source 页面和计划回填的名称键，不写文件或数据库；确认输出无误后才执行：
+
+```powershell
+.venv\Scripts\python.exe tools\migrate_ingest_source_origins.py
+.venv\Scripts\python.exe tools\migrate_ingest_source_origins.py --apply
+```
+
+该工具不会移动或修改任何历史 scheduled 文件、任务、Source 页面或 URL。历史 scheduled 任务仍会以只读文件名检查参与新任务的重名判断。
 
 ## Windows 开发
 

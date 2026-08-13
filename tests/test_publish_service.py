@@ -97,6 +97,7 @@ class PublishServiceTests(unittest.TestCase):
 
             self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
             self.assertEqual(run.call_args.kwargs["errors"], "replace")
+            self.assertEqual(run.call_args.kwargs["env"]["WIKI_SOURCE_ROOT"], str(root.resolve()))
 
     def test_successful_publish_cleans_temporary_snapshot_and_keeps_three_releases(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

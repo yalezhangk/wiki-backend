@@ -38,11 +38,12 @@ class FakeIngestService:
         file: UploadFile,
         auto_convert: bool = True,
         trigger: str = "manual",
+        source_url: str | None = None,
     ) -> IngestJobResponse:
         if self.error is not None:
             raise self.error
         return self.jobs[0].model_copy(
-            update={"original_filename": file.filename, "trigger": trigger}
+            update={"original_filename": file.filename, "trigger": trigger, "source_url": source_url}
         )
 
     def get_job(self, job_id: int) -> IngestJobResponse:
@@ -83,12 +84,13 @@ class IngestApiTests(unittest.TestCase):
     def test_create_scheduled_ingest_job_sets_trigger(self) -> None:
         response = self.client.post(
             "/api/ingest/jobs",
-            data={"trigger": "scheduled"},
+            data={"trigger": "scheduled", "source_url": "https://example.com/report"},
             files={"file": ("report.md", b"# Report", "text/markdown")},
         )
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["trigger"], "scheduled")
+        self.assertEqual(response.json()["source_url"], "https://example.com/report")
 
     def test_create_ingest_job_maps_validation_error(self) -> None:
         self.service.error = IngestValidationError("unsupported file extension: .exe")
@@ -111,6 +113,17 @@ class IngestApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"], "上传文件已存在，请修改文件名后重试: raw/uploads/report.md")
 
+    def test_create_ingest_job_documents_document_name_conflict(self) -> None:
+        response = self.client.get("/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        conflict = response.json()["paths"]["/api/ingest/jobs"]["post"]["responses"]["409"]
+        self.assertEqual(conflict["description"], "文档主名已被未失败的 Ingest 任务占用。")
+        self.assertEqual(
+            conflict["content"]["application/json"]["example"]["detail"],
+            "文档名称已存在，不能重复入库：report",
+        )
+
     def test_get_ingest_job_returns_job(self) -> None:
         response = self.client.get("/api/ingest/jobs/1")
 
@@ -125,6 +138,8 @@ class IngestApiTests(unittest.TestCase):
                 "original_filename": "report.md",
                 "trigger": "manual",
                 "source_path": "raw/uploads/report.md",
+                "document_name_key": None,
+                "source_url": None,
                 "created_pages": [],
                 "updated_pages": [],
                 "contradictions": [],

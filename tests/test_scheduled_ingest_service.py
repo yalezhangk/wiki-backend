@@ -9,6 +9,7 @@ from pathlib import Path
 from app.schemas.ingest import IngestJobResponse, IngestValidation
 from app.services.scheduled_ingest_service import (
     LoopbackIngestApiClient,
+    ScheduledIngestDuplicateError,
     ScheduledIngestError,
     ScheduledIngestService,
 )
@@ -91,11 +92,15 @@ class FakeScheduledApiClient:
         self._jobs: dict[int, IngestJobResponse] = {}
         self.uploads: list[str] = []
 
-    def create_scheduled_job(self, *, source_path: Path, original_filename: str) -> IngestJobResponse:
+    def create_scheduled_job(
+        self, *, source_path: Path, original_filename: str, source_url: str
+    ) -> IngestJobResponse:
         self.uploads.append(original_filename)
         outcome = self._outcomes[original_filename].popleft()
         if outcome == "request_error":
             raise ScheduledIngestError("loopback ingest API is unavailable")
+        if outcome == "duplicate":
+            raise ScheduledIngestDuplicateError("文档名称已存在，跳过重复定时入库")
         job_id = len(self._jobs) + 1
         job = self._job(job_id=job_id, status=outcome)
         self._jobs[job_id] = job
@@ -130,6 +135,7 @@ class ScheduledIngestServiceTests(unittest.TestCase):
         self.root.mkdir()
         self.storage = FakeScheduledStorage()
         self.now = lambda: datetime(2026, 8, 3, 3, 0, 0)
+        (self.root / "readme.txt").write_text("Source URL: https://example.com/root", encoding="utf-8")
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -149,6 +155,7 @@ class ScheduledIngestServiceTests(unittest.TestCase):
         (self.root / "one.md").write_text("# one", encoding="utf-8")
         nested = self.root / "nested"
         nested.mkdir()
+        (nested / "readme.txt").write_text("Source URL: https://example.com/nested", encoding="utf-8")
         (nested / "one.md").write_text("# nested", encoding="utf-8")
         (nested / "ignored.txt").write_text("ignored", encoding="utf-8")
         api_client = FakeScheduledApiClient({"one.md": ["succeeded", "succeeded"]})
@@ -252,6 +259,79 @@ class ScheduledIngestServiceTests(unittest.TestCase):
     def test_loopback_client_rejects_non_loopback_url(self) -> None:
         with self.assertRaises(ScheduledIngestError):
             LoopbackIngestApiClient(base_url="http://example.com:8081")
+
+    def test_readme_requires_exactly_one_http_source_url_and_one_markdown(self) -> None:
+        (self.root / "first.md").write_text("# first", encoding="utf-8")
+        (self.root / "second.md").write_text("# second", encoding="utf-8")
+        api_client = FakeScheduledApiClient({})
+
+        summary = self._service(api_client).run()
+
+        self.assertEqual(summary.failed_count, 2)
+        self.assertEqual(api_client.uploads, [])
+
+    def test_readme_missing_multiple_or_invalid_source_url_is_not_submitted(self) -> None:
+        cases = {
+            "missing": None,
+            "multiple": "Source URL: https://example.com/one\nSource URL: https://example.com/two\n",
+            "invalid": "Source URL: ftp://example.com/article\n",
+        }
+        for name, readme_content in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary_directory:
+                source_root = Path(temporary_directory)
+                (source_root / "article.md").write_text("# article", encoding="utf-8")
+                if readme_content is not None:
+                    (source_root / "readme.txt").write_text(readme_content, encoding="utf-8")
+                api_client = FakeScheduledApiClient({})
+                service = ScheduledIngestService(
+                    storage=FakeScheduledStorage(),
+                    api_client=api_client,
+                    source_root=source_root,
+                    poll_seconds=0.01,
+                    poll_timeout_seconds=1,
+                    now=self.now,
+                    sleep=lambda _: None,
+                )
+
+                summary = service.run()
+
+                self.assertEqual(summary.failed_count, 1)
+                self.assertEqual(api_client.uploads, [])
+
+    def test_bom_readme_source_url_is_sent_to_api(self) -> None:
+        (self.root / "article.md").write_text("# article", encoding="utf-8")
+        (self.root / "readme.txt").write_text(
+            "Source URL: https://example.com/article\n",
+            encoding="utf-8-sig",
+        )
+        api_client = FakeScheduledApiClient({"article.md": ["succeeded"]})
+
+        summary = self._service(api_client).run()
+
+        self.assertEqual(summary.succeeded_count, 1)
+        self.assertEqual(api_client.uploads, ["article.md"])
+
+    def test_duplicate_api_response_is_recorded_as_skip(self) -> None:
+        (self.root / "duplicate.md").write_text("# duplicate", encoding="utf-8")
+        api_client = FakeScheduledApiClient({"duplicate.md": ["duplicate"]})
+
+        summary = self._service(api_client).run()
+
+        self.assertEqual(summary.skipped_count, 1)
+        self.assertEqual(self.storage.completed[1][0], "skipped")
+
+    def test_loopback_payload_includes_source_url(self) -> None:
+        source = self.root / "source.md"
+        source.write_text("# source", encoding="utf-8")
+
+        payload = LoopbackIngestApiClient._multipart_payload(
+            boundary="boundary",
+            source_path=source,
+            original_filename="source.md",
+            source_url="https://example.com/source",
+        )
+
+        self.assertIn(b'name="source_url"\r\n\r\nhttps://example.com/source', payload)
 
 
 if __name__ == "__main__":

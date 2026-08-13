@@ -47,6 +47,8 @@ Otherwise return this successful result:
 }
 
 Important:
+- `source_page` must start with complete YAML Frontmatter. Its `title` must equal the top-level `title`, and it must include `type: source`, `tags`, and `date` before the closing `---`.
+- The backend assigns the final `source_file` or `source_url`; do not rely on either field to replace the required Frontmatter fields above.
 - Set `"overview_update"` to the complete updated `wiki/overview.md` only when the source materially changes the high-level synthesis; otherwise return `null`.
 - Keep generated entity and concept pages focused.
 - Prefer a complete source page, index entry, contradiction list, and log entry.

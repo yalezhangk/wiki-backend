@@ -10,9 +10,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import UploadFile
+from pydantic import ValidationError
 
 from app.llm_config import LLMConfigError, LLMResponseTruncatedError
-from app.schemas.ingest import IngestJobResponse, IngestValidation
+from app.schemas.ingest import IngestJobResponse, IngestLLMResult, IngestValidation
 from app.services.ingest_service import (
     IngestConflictError,
     IngestContentQualityError,
@@ -21,7 +22,7 @@ from app.services.ingest_service import (
     IngestService,
     IngestValidationError,
 )
-from app.storage.mysql import MySQLStorage
+from app.storage.mysql import DuplicateDocumentNameError, MySQLStorage
 
 
 class FakeMigrationCursor:
@@ -86,8 +87,15 @@ class FakeStorage:
         stored_filename: str,
         source_path: str,
         trigger: str = "manual",
+        document_name_key: str | None = None,
+        source_url: str | None = None,
         created_at: datetime,
     ) -> IngestJobResponse:
+        if any(
+            job.document_name_key == document_name_key and job.status != "failed"
+            for job in self.jobs.values()
+        ):
+            raise DuplicateDocumentNameError("ingest document name is already occupied")
         job_id = len(self.jobs) + 1
         job = IngestJobResponse(
             job_id=job_id,
@@ -97,6 +105,8 @@ class FakeStorage:
             original_filename=original_filename,
             trigger=trigger,
             source_path=source_path,
+            document_name_key=document_name_key,
+            source_url=source_url,
             validation=IngestValidation(),
             created_at=created_at,
             updated_at=created_at,
@@ -163,10 +173,20 @@ class FakeStorage:
         self.jobs[job_id] = self.jobs[job_id].model_copy(
             update={
                 "status": "failed",
+                "document_name_key": None,
                 "error": error,
                 "updated_at": finished_at,
                 "finished_at": finished_at,
             }
+        )
+
+    def find_legacy_scheduled_document_name_conflict(self, document_name_key: str) -> bool:
+        return any(
+            job.trigger == "scheduled"
+            and job.document_name_key is None
+            and job.status != "failed"
+            and job.original_filename.casefold().split(".", 1)[0] == document_name_key
+            for job in self.jobs.values()
         )
 
 
@@ -198,18 +218,189 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(job.original_filename, "report.md")
         self.assertEqual(job.trigger, "manual")
         self.assertTrue((self.agent_root / job.source_path).exists())
-        self.assertEqual(job.source_path, "raw/uploads/report.md")
+        self.assertEqual(job.source_path, "raw/uploads/manual/report.md")
+        self.assertEqual(job.document_name_key, "report")
+        self.assertIsNone(job.source_url)
 
-    def test_scheduled_job_uses_unique_stored_filename_and_trigger(self) -> None:
-        first_upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
-        second_upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
+    def test_scheduled_job_uses_scheduled_directory_and_source_url(self) -> None:
+        upload = UploadFile(filename="article.md", file=io.BytesIO(b"# Article"))
 
-        first_job = asyncio.run(self.service.create_job(file=first_upload, trigger="scheduled"))
-        second_job = asyncio.run(self.service.create_job(file=second_upload, trigger="scheduled"))
+        job = asyncio.run(
+            self.service.create_job(
+                file=upload,
+                trigger="scheduled",
+                source_url="https://example.com/article",
+            )
+        )
 
-        self.assertEqual(first_job.trigger, "scheduled")
-        self.assertEqual(second_job.trigger, "scheduled")
-        self.assertNotEqual(first_job.source_path, second_job.source_path)
+        self.assertEqual(job.source_path, "raw/uploads/scheduled/article.md")
+        self.assertEqual(job.source_url, "https://example.com/article")
+
+    def test_source_url_is_required_for_scheduled_and_forbidden_for_manual(self) -> None:
+        with self.assertRaisesRegex(IngestValidationError, "required"):
+            asyncio.run(
+                self.service.create_job(
+                    file=UploadFile(filename="scheduled.md", file=io.BytesIO(b"#")),
+                    trigger="scheduled",
+                )
+            )
+        with self.assertRaisesRegex(IngestValidationError, "only allowed"):
+            asyncio.run(
+                self.service.create_job(
+                    file=UploadFile(filename="manual.md", file=io.BytesIO(b"#")),
+                    source_url="https://example.com/manual",
+                )
+            )
+        with self.assertRaisesRegex(IngestValidationError, "http/https"):
+            asyncio.run(
+                self.service.create_job(
+                    file=UploadFile(filename="invalid-url.md", file=io.BytesIO(b"#")),
+                    trigger="scheduled",
+                    source_url="ftp://example.com/invalid-url",
+                )
+            )
+
+    def test_document_name_rejects_same_stem_across_extension_and_trigger(self) -> None:
+        first = UploadFile(filename="Report.md", file=io.BytesIO(b"# Report"))
+        duplicate = UploadFile(filename="report.txt", file=io.BytesIO(b"Report"))
+
+        asyncio.run(self.service.create_job(file=first))
+        with self.assertRaisesRegex(IngestConflictError, "文档名称已存在，不能重复入库：report"):
+            asyncio.run(
+                self.service.create_job(
+                    file=duplicate,
+                    trigger="scheduled",
+                    source_url="https://example.com/report",
+                )
+            )
+
+    def test_document_name_normalization_and_punctuation_rules(self) -> None:
+        asyncio.run(self.service.create_job(file=UploadFile(filename="Ｒｅｐｏｒｔ　2026.md", file=io.BytesIO(b"#"))))
+        with self.assertRaises(IngestConflictError):
+            asyncio.run(self.service.create_job(file=UploadFile(filename="report   2026.txt", file=io.BytesIO(b"#"))))
+
+        asyncio.run(self.service.create_job(file=UploadFile(filename="行业-报告.md", file=io.BytesIO(b"#"))))
+        asyncio.run(self.service.create_job(file=UploadFile(filename="行业_报告.md", file=io.BytesIO(b"#"))))
+
+    def test_failed_job_releases_document_name(self) -> None:
+        first = asyncio.run(self.service.create_job(file=UploadFile(filename="retry.md", file=io.BytesIO(b"#"))))
+        self.storage.mark_ingest_job_failed(
+            job_id=first.job_id,
+            error="simulated",
+            finished_at=first.created_at,
+        )
+
+        retry = asyncio.run(self.service.create_job(file=UploadFile(filename="retry.txt", file=io.BytesIO(b"#"))))
+
+        self.assertEqual(retry.document_name_key, "retry")
+
+    def test_source_frontmatter_uses_manual_original_file(self) -> None:
+        job = asyncio.run(self.service.create_job(file=UploadFile(filename="report.pdf", file=io.BytesIO(b"%PDF-1.7"))))
+        data = IngestLLMResult(
+            ingest_status="succeeded",
+            ingest_error=None,
+            title="Report",
+            slug="report",
+            source_page='---\ntitle: "Report"\ntype: source\nsource_url: "https://wrong.example"\nsource_file: raw/wrong.pdf\n---\n\n## Summary',
+            index_entry="- [Report](sources/report.md)",
+            log_entry="## log",
+        )
+
+        self.service._write_ingest_result(job, data)
+
+        content = (self.agent_root / "wiki" / "sources" / "report.md").read_text(encoding="utf-8")
+        self.assertIn('title: "Report"', content)
+        self.assertIn("type: source", content)
+        self.assertIn("tags: []", content)
+        self.assertIn(f"date: {job.created_at.date().isoformat()}", content)
+        self.assertIn("source_file: raw/uploads/manual/report.pdf", content)
+        self.assertNotIn("source_url:", content)
+
+    def test_source_frontmatter_uses_scheduled_url_and_refuses_overwrite(self) -> None:
+        job = asyncio.run(
+            self.service.create_job(
+                file=UploadFile(filename="article.md", file=io.BytesIO(b"# Article")),
+                trigger="scheduled",
+                source_url="https://example.com/article",
+            )
+        )
+        data = IngestLLMResult(
+            ingest_status="succeeded",
+            ingest_error=None,
+            title="Article",
+            slug="article",
+            source_page="---\ntitle: Article\ntype: source\nsource_file: raw/uploads/scheduled/article.md\n---\n\n## Summary",
+            index_entry="- [Article](sources/article.md)",
+            log_entry="## log",
+        )
+
+        self.service._write_ingest_result(job, data)
+        content = (self.agent_root / "wiki" / "sources" / "article.md").read_text(encoding="utf-8")
+        self.assertIn('title: "Article"', content)
+        self.assertIn('source_url: "https://example.com/article"', content)
+        self.assertNotIn("source_file:", content)
+
+        with self.assertRaises(IngestConflictError):
+            self.service._write_ingest_result(job, data)
+
+    def test_source_frontmatter_missing_title_uses_result_title_for_manual_job(self) -> None:
+        job = asyncio.run(self.service.create_job(file=UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))))
+        data = IngestLLMResult(
+            ingest_status="succeeded",
+            ingest_error=None,
+            title="中文报告标题",
+            slug="report",
+            source_page="# Report\n\n## Summary",
+            index_entry="- [Report](sources/report.md)",
+            log_entry="## log",
+        )
+
+        with self.assertLogs("app.services.ingest_service", level="INFO") as logs:
+            self.service._write_ingest_result(job, data)
+
+        content = (self.agent_root / "wiki" / "sources" / "report.md").read_text(encoding="utf-8")
+        self.assertIn('title: "中文报告标题"', content)
+        self.assertIn("source_file: raw/uploads/manual/report.md", content)
+        self.assertTrue(any("source_page_has_frontmatter=False" in item for item in logs.output))
+        self.assertTrue(any("source_page_has_title=False" in item for item in logs.output))
+        self.assertTrue(any("applied canonical source Frontmatter" in item for item in logs.output))
+
+    def test_source_frontmatter_missing_title_uses_result_title_for_scheduled_job(self) -> None:
+        job = asyncio.run(
+            self.service.create_job(
+                file=UploadFile(filename="article.md", file=io.BytesIO(b"# Article")),
+                trigger="scheduled",
+                source_url="https://example.com/article",
+            )
+        )
+        data = IngestLLMResult(
+            ingest_status="succeeded",
+            ingest_error=None,
+            title="Scheduled Article",
+            slug="article",
+            source_page="---\ntype: source\n---\n\n## Summary",
+            index_entry="- [Article](sources/article.md)",
+            log_entry="## log",
+        )
+
+        self.service._write_ingest_result(job, data)
+
+        content = (self.agent_root / "wiki" / "sources" / "article.md").read_text(encoding="utf-8")
+        self.assertIn('title: "Scheduled Article"', content)
+        self.assertIn('source_url: "https://example.com/article"', content)
+        self.assertNotIn("source_file:", content)
+
+    def test_llm_result_rejects_blank_title(self) -> None:
+        with self.assertRaises(ValidationError):
+            IngestLLMResult(
+                ingest_status="succeeded",
+                ingest_error=None,
+                title=" \t ",
+                slug="report",
+                source_page="# Report",
+                index_entry="- [Report](sources/report.md)",
+                log_entry="## log",
+            )
 
     def test_create_job_rejects_empty_file(self) -> None:
         upload = UploadFile(filename="empty.md", file=io.BytesIO(b""))
@@ -235,7 +426,7 @@ class IngestServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(IngestValidationError, "maximum upload size"):
             asyncio.run(service.create_job(file=upload))
 
-        self.assertEqual(list((self.agent_root / "raw" / "uploads").iterdir()), [])
+        self.assertEqual(list((self.agent_root / "raw" / "uploads").rglob("*.*")), [])
 
     def test_create_job_rejects_declared_content_type_mismatch(self) -> None:
         upload = UploadFile(
@@ -258,7 +449,7 @@ class IngestServiceTests(unittest.TestCase):
             asyncio.run(self.service.create_job(file=upload))
 
     def test_create_job_detects_filename_conflict(self) -> None:
-        existing = self.agent_root / "raw" / "uploads" / "report.md"
+        existing = self.agent_root / "raw" / "uploads" / "manual" / "report.md"
         existing.parent.mkdir(parents=True)
         existing.write_text("old", encoding="utf-8")
         upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
@@ -778,7 +969,7 @@ class IngestServiceTests(unittest.TestCase):
             '"contradictions":[],"log_entry":"## log"}'
         )
         self.service._call_llm_main = lambda prompt, max_tokens=None: llm_payload  # type: ignore[method-assign]
-        self.service._write_ingest_result = lambda data: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        self.service._write_ingest_result = lambda job, data: (_ for _ in ()).throw(  # type: ignore[method-assign]
             RuntimeError("write failed")
         )
 

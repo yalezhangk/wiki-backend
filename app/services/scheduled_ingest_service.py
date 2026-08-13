@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import time
 import uuid
@@ -21,10 +22,15 @@ from app.time_utils import beijing_now
 
 LOGGER = logging.getLogger(__name__)
 UPLOAD_CHUNK_BYTES = 64 * 1024
+SOURCE_URL_PATTERN = re.compile(r"(?im)^Source URL:\s*(https?://\S+)\s*$")
 
 
 class ScheduledIngestError(RuntimeError):
     """定时源目录无法安全扫描或本机 Ingest API 不可用时抛出。"""
+
+
+class ScheduledIngestDuplicateError(ScheduledIngestError):
+    """定时来源已由全局文档名约束占用。"""
 
 
 class ScheduledIngestStorage(Protocol):
@@ -66,7 +72,9 @@ class ScheduledIngestStorage(Protocol):
 
 
 class ScheduledIngestApiClient(Protocol):
-    def create_scheduled_job(self, *, source_path: Path, original_filename: str) -> IngestJobResponse:
+    def create_scheduled_job(
+        self, *, source_path: Path, original_filename: str, source_url: str
+    ) -> IngestJobResponse:
         ...
 
     def get_job(self, job_id: int) -> IngestJobResponse:
@@ -97,12 +105,15 @@ class LoopbackIngestApiClient:
         self._base_url = self._validate_base_url(base_url)
         self._timeout_seconds = timeout_seconds
 
-    def create_scheduled_job(self, *, source_path: Path, original_filename: str) -> IngestJobResponse:
+    def create_scheduled_job(
+        self, *, source_path: Path, original_filename: str, source_url: str
+    ) -> IngestJobResponse:
         boundary = f"----wiki-backend-{uuid.uuid4().hex}"
         payload = self._multipart_payload(
             boundary=boundary,
             source_path=source_path,
             original_filename=original_filename,
+            source_url=source_url,
         )
         request = Request(
             url=f"{self._base_url}/api/ingest/jobs",
@@ -127,6 +138,8 @@ class LoopbackIngestApiClient:
             with urlopen(request, timeout=self._timeout_seconds) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
+            if exc.code == 409:
+                raise ScheduledIngestDuplicateError("文档名称已存在，跳过重复定时入库") from exc
             raise ScheduledIngestError(f"loopback ingest API returned HTTP {exc.code}") from exc
         except (URLError, TimeoutError, ValueError) as exc:
             raise ScheduledIngestError("loopback ingest API is unavailable") from exc
@@ -136,7 +149,9 @@ class LoopbackIngestApiClient:
             raise ScheduledIngestError("loopback ingest API returned an invalid job response") from exc
 
     @staticmethod
-    def _multipart_payload(*, boundary: str, source_path: Path, original_filename: str) -> bytes:
+    def _multipart_payload(
+        *, boundary: str, source_path: Path, original_filename: str, source_url: str
+    ) -> bytes:
         content = source_path.read_bytes()
         escaped_filename = original_filename.replace('"', "_").replace("\r", "_").replace("\n", "_")
         prefix = (
@@ -146,6 +161,9 @@ class LoopbackIngestApiClient:
             f"--{boundary}\r\n"
             'Content-Disposition: form-data; name="auto_convert"\r\n\r\n'
             "true\r\n"
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="source_url"\r\n\r\n'
+            f"{source_url}\r\n"
             f"--{boundary}\r\n"
             f'Content-Disposition: form-data; name="file"; filename="{escaped_filename}"\r\n'
             "Content-Type: text/markdown\r\n\r\n"
@@ -189,11 +207,25 @@ class ScheduledIngestService:
         for recovery_error in self._storage.recover_scheduled_ingest_sources(now=self._now()):
             LOGGER.error("Scheduled ingest recovery failed source=%s", recovery_error)
         candidates = self._markdown_files(root)
+        directory_counts = self._markdown_directory_counts(candidates)
         summary = ScheduledIngestSummary(scanned_count=len(candidates))
         LOGGER.info("Scheduled Markdown ingest scan started scanned=%s", summary.scanned_count)
 
         for source_path in candidates:
             relative_path = source_path.relative_to(root).as_posix()
+            source_url, source_error = self._extract_source_url(
+                directory=source_path.parent,
+                markdown_count=directory_counts[source_path.parent],
+            )
+            if source_error is not None:
+                summary = self._replace_summary(summary, failed_count=summary.failed_count + 1)
+                LOGGER.error(
+                    "Scheduled ingest skipped relative_path=%s reason=%s",
+                    relative_path,
+                    source_error,
+                )
+                continue
+            assert source_url is not None
             with TemporaryDirectory(prefix="wiki-backend-scheduled-ingest-") as temporary_directory:
                 snapshot = self._create_stable_snapshot(
                     source_path=source_path,
@@ -224,8 +256,16 @@ class ScheduledIngestService:
 
                 summary = self._replace_summary(summary, candidate_count=summary.candidate_count + 1)
                 LOGGER.info("Scheduled ingest processing relative_path=%s", relative_path)
-                if self._ingest_source(record=record, snapshot_path=snapshot.path, original_filename=source_path.name):
+                outcome = self._ingest_source(
+                    record=record,
+                    snapshot_path=snapshot.path,
+                    original_filename=source_path.name,
+                    source_url=source_url,
+                )
+                if outcome == "succeeded":
                     summary = self._replace_summary(summary, succeeded_count=summary.succeeded_count + 1)
+                elif outcome == "duplicate":
+                    summary = self._replace_summary(summary, skipped_count=summary.skipped_count + 1)
                 else:
                     summary = self._replace_summary(summary, failed_count=summary.failed_count + 1)
 
@@ -246,7 +286,8 @@ class ScheduledIngestService:
         record: ScheduledIngestSource,
         snapshot_path: Path,
         original_filename: str,
-    ) -> bool:
+        source_url: str,
+    ) -> str:
         last_error: str | None = None
         job_id: int | None = None
         self._storage.record_scheduled_ingest_attempt(
@@ -259,6 +300,7 @@ class ScheduledIngestService:
             job = self._api_client.create_scheduled_job(
                 source_path=snapshot_path,
                 original_filename=original_filename,
+                source_url=source_url,
             )
             job_id = job.job_id
             LOGGER.info(
@@ -283,7 +325,7 @@ class ScheduledIngestService:
                     record.relative_path,
                     job_id,
                 )
-                return True
+                return "succeeded"
             last_error = completed_job.error or "ingest job failed"
             LOGGER.warning(
                 "Scheduled ingest job failed relative_path=%s job_id=%s error=%s",
@@ -291,6 +333,18 @@ class ScheduledIngestService:
                 job_id,
                 last_error,
             )
+        except ScheduledIngestDuplicateError as exc:
+            self._storage.complete_scheduled_ingest_source(
+                source_id=record.source_id,
+                state="skipped",
+                error=str(exc)[:1000],
+                finished_at=self._now(),
+            )
+            LOGGER.info(
+                "Scheduled ingest duplicate skipped relative_path=%s",
+                record.relative_path,
+            )
+            return "duplicate"
         except Exception as exc:
             last_error = str(exc)
             LOGGER.warning(
@@ -308,7 +362,7 @@ class ScheduledIngestService:
             finished_at=self._now(),
         )
         LOGGER.error("Scheduled ingest failed relative_path=%s error=%s", record.relative_path, safe_error)
-        return False
+        return "failed"
 
     def _wait_for_terminal_job(self, job_id: int) -> IngestJobResponse:
         deadline = time.monotonic() + self._poll_timeout_seconds
@@ -340,6 +394,34 @@ class ScheduledIngestService:
                     continue
                 files.append(path)
         return sorted(files, key=lambda path: path.relative_to(root).as_posix())
+
+    @staticmethod
+    def _markdown_directory_counts(candidates: list[Path]) -> dict[Path, int]:
+        counts: dict[Path, int] = {}
+        for candidate in candidates:
+            counts[candidate.parent] = counts.get(candidate.parent, 0) + 1
+        return counts
+
+    @staticmethod
+    def _extract_source_url(*, directory: Path, markdown_count: int) -> tuple[str | None, str | None]:
+        if markdown_count != 1:
+            return None, "multiple_markdown_files_in_directory"
+        readme_path = directory / "readme.txt"
+        try:
+            content = readme_path.read_text(encoding="utf-8-sig")
+        except FileNotFoundError:
+            return None, "source_url_readme_missing"
+        except UnicodeDecodeError:
+            return None, "source_url_readme_not_utf8"
+        values = re.findall(r"(?im)^Source URL:\s*(\S+)\s*$", content)
+        if not values:
+            return None, "source_url_missing"
+        if len(values) != 1:
+            return None, "source_url_multiple"
+        source_url_match = SOURCE_URL_PATTERN.search(content)
+        if source_url_match is None:
+            return None, "source_url_invalid_protocol"
+        return source_url_match.group(1), None
 
     @staticmethod
     def _create_stable_snapshot(

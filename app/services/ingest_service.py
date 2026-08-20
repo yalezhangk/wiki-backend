@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import shutil
 import subprocess
@@ -18,7 +19,13 @@ from fastapi import UploadFile
 from pydantic import HttpUrl, TypeAdapter, ValidationError
 
 from app.config import settings
-from app.llm_config import LLMConfigError, LLMResponseTruncatedError, call_llm_main
+from app.llm_config import (
+    IngestModelProfile,
+    LLMConfigError,
+    LLMResponseTruncatedError,
+    call_llm_profile,
+    resolve_ingest_model_profile,
+)
 from app.prompts import load_prompt, render_prompt
 from app.schemas.ingest import (
     IngestJobResponse,
@@ -194,6 +201,7 @@ class IngestStorage(Protocol):
         trigger: IngestTrigger,
         document_name_key: str,
         source_url: str | None,
+        ingest_model: str,
         created_at: datetime,
     ) -> IngestJobResponse:
         ...
@@ -286,6 +294,7 @@ class IngestService:
             raise IngestValidationError(f"non-markdown file requires auto_convert: {suffix}")
 
         normalized_source_url = self._validate_source_url(trigger=trigger, source_url=source_url)
+        ingest_profile = self._resolve_ingest_profile()
         document_name_key = normalize_document_name(original_filename)
         if not document_name_key:
             raise IngestValidationError("filename stem cannot be empty")
@@ -313,6 +322,7 @@ class IngestService:
                 trigger=trigger,
                 document_name_key=document_name_key,
                 source_url=normalized_source_url,
+                ingest_model=ingest_profile.model_identifier,
                 created_at=created_at,
             )
         except DuplicateDocumentNameError as exc:
@@ -444,9 +454,11 @@ class IngestService:
                     "已尝试 OCR，但未能提取足够的可读文本；请检查扫描件清晰度后重试。",
                 ) from ocr_error
         self._update_progress(job_id, "extracting", 35)
+        ingest_profile = self._resolve_ingest_profile(job.ingest_model)
         prompt = self._build_prompt(source=source, source_content=source_content)
+        self._assert_prompt_fits_model_context(prompt=prompt, ingest_profile=ingest_profile)
         try:
-            raw = self._call_llm_with_retry(prompt)
+            raw = self._call_llm_with_retry(prompt, ingest_profile=ingest_profile)
         except IngestLLMResponseTruncatedError as exc:
             if exc.response_content:
                 debug_path = self._write_llm_debug_response(
@@ -466,6 +478,7 @@ class IngestService:
             raw=raw,
             source_path=source_path,
             job_id=job_id,
+            ingest_profile=ingest_profile,
         )
         try:
             if parsed.get("ingest_status") == "failed":
@@ -551,6 +564,7 @@ class IngestService:
         raw: str,
         source_path: Path,
         job_id: int,
+        ingest_profile: IngestModelProfile | None = None,
     ) -> dict[str, Any]:
         self._last_llm_result_raw = raw
         try:
@@ -572,6 +586,7 @@ class IngestService:
             if isinstance(first_error, IngestLLMResponseTruncatedError):
                 raise
 
+        selected_profile = ingest_profile or self._resolve_ingest_profile()
         repair_prompt = (
             f"{prompt}\n\n"
             "The response below could not be parsed as a JSON object. Repair its JSON "
@@ -581,7 +596,7 @@ class IngestService:
             f"{raw}\n"
             "=== INVALID RESPONSE END ==="
         )
-        retry_raw = self._call_llm_with_retry(repair_prompt)
+        retry_raw = self._call_llm_with_retry(repair_prompt, ingest_profile=selected_profile)
         self._last_llm_result_raw = retry_raw
         try:
             return self._parse_json_from_response(retry_raw)
@@ -728,7 +743,7 @@ class IngestService:
         source_label = source.relative_to(self._agent_root).as_posix()
         return render_prompt(
             "ingest.md",
-            schema=load_prompt("agent_instructions.md"),
+            ingest_instructions=load_prompt("ingest_instructions.md"),
             wiki_context=self._build_wiki_context() or "(wiki is empty - this is the first source)",
             source_label=source_label,
             source_content=source_content,
@@ -1038,11 +1053,23 @@ class IngestService:
         except ValueError:
             return str(debug_path)
 
-    def _call_llm_with_retry(self, prompt: str) -> str:
-        call_llm_main = self._get_llm_caller()
+    def _call_llm_with_retry(
+        self,
+        prompt: str,
+        *,
+        ingest_profile: IngestModelProfile | None = None,
+    ) -> str:
+        selected_profile = ingest_profile or self._resolve_ingest_profile()
+        self._assert_prompt_fits_model_context(prompt=prompt, ingest_profile=selected_profile)
         for attempt in range(2):
             try:
-                return call_llm_main(prompt, max_tokens=self._ingest_llm_max_tokens)
+                if self._call_llm_main is not None:
+                    return self._call_llm_main(prompt, max_tokens=self._ingest_llm_max_tokens)
+                return call_llm_profile(
+                    prompt,
+                    selected_profile.llm_profile,
+                    max_tokens=self._ingest_llm_max_tokens,
+                )
             except LLMResponseTruncatedError as exc:
                 raise IngestLLMResponseTruncatedError(
                     response_content=exc.response_content,
@@ -1069,14 +1096,52 @@ class IngestService:
         name = type(exc).__name__.lower()
         return "timeout" in name or "connection" in name or "ratelimit" in name
 
-    def _get_llm_caller(self) -> Callable[[str, int | None], str]:
-        if self._call_llm_main is None:
-            self._call_llm_main = self._load_llm_caller()
-        assert self._call_llm_main is not None
-        return self._call_llm_main
+    @staticmethod
+    def _estimate_prompt_tokens(prompt: str) -> int:
+        """按中日韩字符和 ASCII 单词分别估算，供本地 Qwen 的保守窗口预检使用。"""
+        ascii_word_characters = sum(character.isascii() and character.isalnum() for character in prompt)
+        other_characters = len(prompt) - ascii_word_characters
+        return other_characters + math.ceil(ascii_word_characters / 4)
 
-    def _load_llm_caller(self) -> Callable[[str, int | None], str]:
-        return call_llm_main
+    def _assert_prompt_fits_model_context(
+        self,
+        *,
+        prompt: str,
+        ingest_profile: IngestModelProfile,
+    ) -> None:
+        capabilities = ingest_profile.capabilities
+        if capabilities.context_window_tokens is None:
+            LOGGER.info(
+                "Ingest prompt budget skipped model=%s budget_mode=unbounded_provider_managed",
+                ingest_profile.model_identifier,
+            )
+            return
+        input_tokens = self._estimate_prompt_tokens(prompt)
+        assert capabilities.max_input_tokens is not None
+        assert capabilities.context_safety_margin_tokens is not None
+        if (
+            input_tokens > capabilities.max_input_tokens
+            or input_tokens + self._ingest_llm_max_tokens + capabilities.context_safety_margin_tokens
+            > capabilities.context_window_tokens
+        ):
+            raise IngestContentQualityError(
+                "ingest_source_context_too_large",
+                "文档与当前 Wiki 上下文超过本地 Ingest 模型的可用上下文窗口。",
+            )
+        LOGGER.info(
+            "Ingest prompt budget accepted model=%s input_tokens=%s max_input_tokens=%s "
+            "max_output_tokens=%s context_safety_margin_tokens=%s context_window_tokens=%s",
+            ingest_profile.model_identifier,
+            input_tokens,
+            capabilities.max_input_tokens,
+            self._ingest_llm_max_tokens,
+            capabilities.context_safety_margin_tokens,
+            capabilities.context_window_tokens,
+        )
+
+    @staticmethod
+    def _resolve_ingest_profile(model_identifier: str | None = None) -> IngestModelProfile:
+        return resolve_ingest_model_profile(model_identifier)
 
     @staticmethod
     def _document_name_conflict_message(document_name_key: str) -> str:

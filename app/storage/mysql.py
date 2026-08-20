@@ -113,6 +113,7 @@ class MySQLStorage:
                         source_path VARCHAR(500) NOT NULL,
                         document_name_key VARCHAR(255) NULL,
                         source_url VARCHAR(2048) NULL,
+                        ingest_model VARCHAR(255) NULL,
                         created_pages JSON NOT NULL,
                         updated_pages JSON NOT NULL,
                         contradictions JSON NOT NULL,
@@ -237,6 +238,7 @@ class MySQLStorage:
                 self._ensure_ingest_progress_columns(cursor)
                 self._ensure_ingest_trigger_column(cursor)
                 self._ensure_ingest_source_origin_columns(cursor)
+                self._ensure_ingest_model_column(cursor)
                 self._ensure_message_citations_column(cursor)
                 self._ensure_message_model_profile_columns(cursor)
                 self._apply_schema_comments(cursor)
@@ -573,6 +575,7 @@ class MySQLStorage:
         document_name_key: str | None = None,
         source_url: str | None = None,
         created_at: datetime,
+        ingest_model: str | None = None,
     ) -> IngestJobResponse:
         empty_array = json.dumps([], ensure_ascii=False)
         empty_validation = json.dumps({"broken_links": [], "unindexed": []}, ensure_ascii=False)
@@ -585,11 +588,11 @@ class MySQLStorage:
                         INSERT INTO ingest_jobs (
                             status, stage, progress_percent, `trigger`,
                             original_filename, stored_filename, source_path,
-                            document_name_key, source_url,
+                            document_name_key, source_url, ingest_model,
                             created_pages, updated_pages, contradictions, validation,
                             error, created_at, started_at, updated_at, finished_at
                         )
-                        VALUES (%s, 'uploaded', 0, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NULL, %s, NULL)
+                        VALUES (%s, 'uploaded', 0, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NULL, %s, NULL)
                         """,
                         (
                             status,
@@ -599,6 +602,7 @@ class MySQLStorage:
                             source_path,
                             document_name_key,
                             source_url,
+                            ingest_model,
                             empty_array,
                             empty_array,
                             empty_array,
@@ -1590,6 +1594,22 @@ class MySQLStorage:
             )
 
     @staticmethod
+    def _ensure_ingest_model_column(cursor: Any) -> None:
+        cursor.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'ingest_jobs'
+              AND COLUMN_NAME = 'ingest_model'
+            """
+        )
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "ALTER TABLE ingest_jobs ADD COLUMN ingest_model VARCHAR(255) NULL AFTER source_url"
+            )
+
+    @staticmethod
     def _scheduled_ingest_source_key(source_root: str, relative_path: str) -> str:
         payload = f"{source_root}\x00{relative_path}".encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
@@ -1950,6 +1970,7 @@ class MySQLStorage:
             source_path=str(row["source_path"]),
             document_name_key=row.get("document_name_key"),
             source_url=row.get("source_url"),
+            ingest_model=row.get("ingest_model"),
             created_pages=self._parse_json_field(row.get("created_pages")),
             updated_pages=self._parse_json_field(row.get("updated_pages")),
             contradictions=self._parse_json_field(row.get("contradictions")),

@@ -90,6 +90,7 @@ class FakeStorage:
         document_name_key: str | None = None,
         source_url: str | None = None,
         created_at: datetime,
+        ingest_model: str | None = None,
     ) -> IngestJobResponse:
         if any(
             job.document_name_key == document_name_key and job.status != "failed"
@@ -107,6 +108,7 @@ class FakeStorage:
             source_path=source_path,
             document_name_key=document_name_key,
             source_url=source_url,
+            ingest_model=ingest_model,
             validation=IngestValidation(),
             created_at=created_at,
             updated_at=created_at,
@@ -196,12 +198,11 @@ class IngestServiceTests(unittest.TestCase):
         self.agent_root = Path(self.temp_dir.name)
         (self.agent_root / "wiki").mkdir()
         self.storage = FakeStorage()
-        with patch.object(IngestService, "_load_llm_caller", return_value=lambda prompt, max_tokens=None: "{}"):
-            self.service = IngestService(
-                storage=self.storage,
-                agent_root=self.agent_root,
-                start_worker=False,
-            )
+        self.service = IngestService(
+            storage=self.storage,
+            agent_root=self.agent_root,
+            start_worker=False,
+        )
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -209,7 +210,10 @@ class IngestServiceTests(unittest.TestCase):
     def test_create_job_saves_markdown_upload(self) -> None:
         upload = UploadFile(filename="../report.md", file=io.BytesIO(b"# Report"))
 
-        job = asyncio.run(self.service.create_job(file=upload))
+        with patch("app.services.ingest_service.settings.ingest_provider", "deepseek"), patch(
+            "app.services.ingest_service.settings.ingest_model", "deepseek-v4-pro"
+        ):
+            job = asyncio.run(self.service.create_job(file=upload))
 
         self.assertEqual(job.status, "queued")
         self.assertEqual(job.stage, "uploaded")
@@ -221,6 +225,7 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(job.source_path, "raw/uploads/manual/report.md")
         self.assertEqual(job.document_name_key, "report")
         self.assertIsNone(job.source_url)
+        self.assertEqual(job.ingest_model, "deepseek/deepseek-v4-pro")
 
     def test_scheduled_job_uses_scheduled_directory_and_source_url(self) -> None:
         upload = UploadFile(filename="article.md", file=io.BytesIO(b"# Article"))
@@ -561,6 +566,40 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(service._call_llm_with_retry("prompt"), "{}")
         self.assertEqual(observed_max_tokens, [12288])
 
+    def test_qwen_ingest_prompt_over_context_fails_before_llm_call(self) -> None:
+        with patch("app.services.ingest_service.settings.ingest_provider", "ollama_chat"), patch(
+            "app.services.ingest_service.settings.ingest_model", "qwen3.6:35b"
+        ), patch("app.services.ingest_service.settings.ingest_reasoning_effort", "none"):
+            profile = self.service._resolve_ingest_profile()
+            self.service._call_llm_main = lambda prompt, max_tokens=None: (_ for _ in ()).throw(
+                AssertionError("超出上下文窗口时不得调用模型")
+            )
+
+            with self.assertRaises(IngestContentQualityError) as context:
+                self.service._call_llm_with_retry("中" * 50000, ingest_profile=profile)
+
+        self.assertEqual(context.exception.category, "ingest_source_context_too_large")
+
+    def test_qwen_ingest_profile_records_model_and_uses_direct_reasoning(self) -> None:
+        with patch("app.services.ingest_service.settings.ingest_provider", "ollama_chat"), patch(
+            "app.services.ingest_service.settings.ingest_model", "qwen3.6:35b"
+        ), patch("app.services.ingest_service.settings.ingest_reasoning_effort", "none"):
+            job = asyncio.run(
+                self.service.create_job(file=UploadFile(filename="local.md", file=io.BytesIO(b"# Local")))
+            )
+            profile = self.service._resolve_ingest_profile(job.ingest_model)
+
+        self.assertEqual(job.ingest_model, "ollama_chat/qwen3.6:35b")
+        self.assertEqual(profile.llm_profile.reasoning_effort, "none")
+
+    def test_ingest_uses_resolved_profile_for_litellm_call(self) -> None:
+        profile = self.service._resolve_ingest_profile()
+        with patch("app.services.ingest_service.call_llm_profile", return_value="{}") as caller:
+            self.assertEqual(self.service._call_llm_with_retry("prompt", ingest_profile=profile), "{}")
+
+        self.assertEqual(caller.call_args.args[1], profile.llm_profile)
+        self.assertEqual(caller.call_args.kwargs["max_tokens"], self.service._ingest_llm_max_tokens)
+
     def test_empty_response_retries_once(self) -> None:
         calls = 0
 
@@ -741,16 +780,19 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(result, converted)
         rapidocr_converter.assert_called_once_with(source)
 
-    def test_build_prompt_allows_conditional_overview_update(self) -> None:
+    def test_build_prompt_disables_overview_rewrite(self) -> None:
         source = self.agent_root / "raw" / "uploads" / "report.md"
         source.parent.mkdir(parents=True)
         source.write_text("# Report", encoding="utf-8")
 
         prompt = self.service._build_prompt(source=source, source_content="# Report")
 
-        self.assertIn("LLM Wiki Agent — Schema & Workflow Instructions", prompt)
-        self.assertIn("full updated content for wiki/overview.md", prompt)
-        self.assertIn("otherwise return `null`", prompt)
+        self.assertIn("Ingest Wiki Instructions", prompt)
+        self.assertIn("## Ingest Workflow", prompt)
+        self.assertIn("Create exactly one source page", prompt)
+        self.assertNotIn("Query Workflow", prompt)
+        self.assertIn('"overview_update": null', prompt)
+        self.assertIn("Do not rewrite or reproduce `wiki/overview.md`", prompt)
         self.assertIn('"ingest_status": "succeeded"', prompt)
         self.assertIn('"ingest_status": "failed"', prompt)
 
@@ -928,6 +970,13 @@ class IngestServiceTests(unittest.TestCase):
         MySQLStorage._ensure_ingest_trigger_column(cursor)
 
         self.assertIn("ADD COLUMN `trigger` VARCHAR(32) NOT NULL DEFAULT 'manual'", "\n".join(cursor.queries))
+
+    def test_mysql_upgrade_adds_ingest_model_column(self) -> None:
+        cursor = FakeMigrationCursor()
+
+        MySQLStorage._ensure_ingest_model_column(cursor)
+
+        self.assertIn("ADD COLUMN ingest_model VARCHAR(255) NULL", "\n".join(cursor.queries))
 
     def test_mysql_recovery_marks_unknown_or_nonterminal_scheduled_jobs_failed(self) -> None:
         now = datetime(2026, 8, 3, 3, 0, 0)

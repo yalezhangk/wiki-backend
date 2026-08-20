@@ -140,6 +140,7 @@ class IngestApiTests(unittest.TestCase):
                 "source_path": "raw/uploads/report.md",
                 "document_name_key": None,
                 "source_url": None,
+                "ingest_model": None,
                 "created_pages": [],
                 "updated_pages": [],
                 "contradictions": [],

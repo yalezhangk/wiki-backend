@@ -1,115 +1,215 @@
-# Ingest 文档上传与入库流程
+# 当前 Ingest 工作流
 
-本文依据当前 `wiki-backend` 实现梳理 Ingest 的运行流程、任务状态和同名文件处理方式。
+本文只描述当前 `wiki-backend` 代码已经实现的 Ingest 行为。它不是目标架构、
+也不是后续可能增加的长文分块、相关 Wiki 检索或多阶段 Agent 方案。
 
-## 范围与边界
+## 总览
 
-Ingest 由 `wiki-backend` 提供 HTTP 接口，使用 MySQL 持久化任务元数据，并在
-`WIKI_AGENT_REPO_PATH` 指向的 agent 仓库内读写 `raw/uploads/` 与 `wiki/`。
-
-Ingest 成功只表示 Wiki 文件已写入和校验完成。应用正常初始化 MySQL 与
-`PublishService` 时，成功任务会自动加入 Quartz 合并发布队列；只有对应
-`publication.status=published` 或发布任务成功后，才表示 `quartz/public` 已更新。
-
-## 调用入口与异步模型
-
-客户端通过 `POST /api/ingest/jobs` 以 `multipart/form-data` 上传 `file`，可选参数
-`auto_convert` 默认为 `true`，`trigger` 默认为 `manual`；DGX 定时同步显式使用
-`trigger=scheduled`。
-
-路由将工作交给 `IngestService.create_job()`：文件成功保存、MySQL 任务创建且任务放入
-内存队列后，即返回 `202 Accepted`。这表示任务已入队，不表示资料已进入 Wiki。
-
-应用启动时会创建一个 `IngestService`；服务内部使用一个 daemon worker 线程消费
-`Queue[int]` 中的数字 job ID。因此当前队列是进程内队列，而不是由 MySQL 驱动的可恢复任务队列。
+当前 Ingest 是单进程内存队列中的单 worker 工作流：对一份文档构造一次完整 Prompt，
+调用一次 Ingest 模型以取得完整 JSON；后端校验并写入 Wiki，最后加入 Quartz 发布队列。
 
 ```text
 POST /api/ingest/jobs
-  -> 校验并保存上传源文件
-  -> MySQL 创建 queued 任务
-  -> 内存 Queue
-  -> worker 转换、LLM 提取、写 Wiki、校验
-  -> MySQL 更新 succeeded 或 failed
+  -> 校验并保存上传文件
+  -> MySQL 创建 queued job（保存 ingest_model）
+  -> 当前进程内 Queue
+  -> daemon worker
+       -> 转 Markdown / PDF OCR（需要时）
+       -> 文本质量预检
+       -> 拼完整 Prompt
+       -> 一次 LLM 完整 JSON 生成
+       -> JSON 解析；非截断错误时可修复一次
+       -> Pydantic 结果校验
+       -> 写 Source / Entity / Concept / index / log
+       -> 断链与索引校验
+  -> MySQL 标记 succeeded 或 failed
   -> succeeded 时加入 Quartz 发布队列
-  -> failed 时删除该任务 source_path 指向的上传源文件
 ```
 
-## 上传接收与源文件落盘
+`202 Accepted` 只表示文件已保存且任务已进入内存队列，不表示 Wiki 已写入；
+`succeeded` 只表示 Wiki 写入已完成，只有 `publication.status=published` 才表示
+Quartz 静态站点已经更新。
 
-`create_job()` 依次执行以下步骤：
+## 1. 接口、任务与队列
 
-1. 取 `Path(file.filename).name`，丢弃浏览器携带的客户端目录。
-2. 检查文件名不为空、扩展名受支持；非 `.md` 文件在 `auto_convert=false` 时被拒绝。
-3. 使用 `_safe_filename()` 生成保存名：替换 Windows 非法字符、将连续空白替换为 `-`、去除首尾 `.`/`-`，最多保留 180 个字符。API 的 `original_filename` 保留去除客户端目录后的原名，`source_path` 使用安全保存名。
-4. 人工上传的目标路径为 `raw/uploads/<保存名>`。例如上传 `报告.pdf`，源文件保存为 `raw/uploads/报告.pdf`；定时同步任务会在安全文件名后追加随机 UUID，避免不同源目录中的同名文件互相冲突。
-5. 使用 64 KiB 分块以独占新建模式写文件；校验总大小、声明的 MIME 类型，以及 PDF、Office、EPUB、XLS、RTF、WAV、MP3 等格式的文件签名或容器结构。
-6. 若大小、类型或签名校验失败，删除本次部分落盘文件，不创建任务。
+入口为 `POST /api/ingest/jobs`，使用 `multipart/form-data`：
 
-上传成功后创建 `ingest_jobs` 记录，初始值为：
+- `file` 必填；
+- `auto_convert` 默认 `true`；非 Markdown 在设为 `false` 时被拒绝；
+- `trigger` 默认 `manual`；`scheduled` 必须附带 HTTP/HTTPS `source_url`；
+- 路由调用 `IngestService.create_job()`，成功后返回任务对象。
 
-- `status=queued`
-- `stage=uploaded`
-- `progress_percent=0`
-- `source_path=raw/uploads/<保存名>`
+创建任务时会：
 
-## 后台处理与 Wiki 写入
+1. 去掉浏览器传来的客户端目录，检查文件名、扩展名和触发方式。
+2. 使用 `normalize_document_name()` 建立全局文档主名唯一键，检查 manual/scheduled 冲突。
+3. 使用 `_safe_filename()` 生成落盘文件名。
+4. 将 manual 文件写入 `raw/uploads/manual/`，scheduled 文件写入 `raw/uploads/scheduled/`。
+5. 以 64 KiB 分块独占新建文件，校验文件大小、声明 MIME 类型及支持格式的签名/容器结构。
+6. 创建 MySQL `ingest_jobs` 记录，初始为 `queued/uploaded/0%`。
+7. 保存此时解析出的 `ingest_model`，并将 job ID 放入服务实例内的 `Queue[int]`。
 
-worker 取到 job ID 后，将任务标为 `running`，再按以下顺序执行：
+worker 是 daemon 线程，不是 MySQL 持久化队列。服务重启时未处理的内存 Queue 项不会由
+该队列本身恢复。任务只保存模型标识，不保存完整的模型配置、输出预算、Prompt 版本或 API 地址；
+worker 会按照该模型标识和运行时配置重新构造 profile。
 
-1. **转换**：Markdown 直接处理；PDF 先用 `pdfplumber` 检查加密、损坏和文本层。有文本层时优先使用 MarkItDown，转换报错时回退 PyMuPDF；无文本层或原生转换结果质量不足时，若显式启用且可用则先尝试 Marker，否则直接使用 RapidOCR，Marker 超时、失败、无输出或低质量时也回退 RapidOCR。其他受支持格式通过 MarkItDown 转换。转换结果写入源文件同目录、同基名的 `.md`。
-2. **提取**：读取 Markdown 内容，并附带 `wiki/index.md`、`wiki/overview.md` 与最近五篇 source 页面组成 Prompt，调用主 LLM。
-3. **结果校验**：LLM 必须返回符合 `IngestLLMResult` 的 JSON。首次 JSON 无法解析时会请求模型修复一次；明确截断的响应直接失败。失败响应会在 `uploads/` 旁写入带 job ID 的诊断文本。
-4. **写 Wiki**：校验 `slug` 和 Entity/Concept 输出路径后，原子写入 `wiki/sources/<slug>.md`、`wiki/entities/*.md`、`wiki/concepts/*.md`；必要时覆盖 `wiki/overview.md`，并更新 `wiki/index.md` 与 `wiki/log.md`。
-5. **后处理校验**：检查本次改动页面中的断裂 `[[wikilinks]]`，并检查新页面是否出现在索引中。
-6. **完成或失败**：成功时写入创建/更新页面、矛盾列表和校验结果，标为 `succeeded`，并在 `PublishService` 可用时加入 Quartz 发布队列；任何处理异常都会记录错误、标为 `failed`，并删除该任务 `source_path` 指向的上传源文件。非 Markdown 转换结果和 LLM 调试文件不是 `source_path`，当前不会随之统一删除。
+## 2. 文档转换与内容预检
 
-## 阶段与进度
+worker 取出 job 后先标记 `running`。Markdown 直接读取；其他格式通过 MarkItDown 转成
+Markdown。PDF 先检查文本层：有文本层时优先 MarkItDown，失败时回退 PyMuPDF；无文本层或
+原生转换质量不足时使用 OCR（Marker 可用且已启用时优先，否则使用 RapidOCR）。
 
-| 阶段 | 进度 | 含义 |
-| --- | ---: | --- |
-| `uploaded` | 0 | 源文件已保存，任务已入队 |
-| `converting` | 10 | 非 Markdown 文件正在转换 |
-| `extracting` | 35 | 正在读取 Markdown 并调用 LLM 提取知识 |
-| `writing_wiki` | 65 | 正在写入 Wiki 页面、索引和日志 |
-| `validating` | 85 | 正在检查断链和未索引页面 |
-| `completed` | 100 | Wiki 写入及校验完成 |
+转换/读取后，后端会拒绝：
 
-失败任务保留失败前最后一个 `stage` 和 `progress_percent`，便于定位失败边界。
+- 空文本；
+- 控制字符或替换字符比例达到 1% 的文本；
+- 非 Markdown 转换后可读字母数字字符过少的文本；
+- 加密、损坏或 OCR 无法获得足够可读内容的 PDF。
 
-## 同名文件判断
+非 Markdown 任务在转换时进度为 `converting/10%`；可用 Markdown 准备完成后进入
+`extracting/35%`。
 
-人工上传源文件的同名判断由文件系统完成，不查询 MySQL：
+## 3. Prompt 的实际组成
 
-1. 保存前先检查 `raw/uploads/<保存名>` 是否存在。存在即抛出 `IngestConflictError`。
-2. 真正落盘时使用 `open("xb")` 独占创建。即使两个请求同时通过前置检查，后到请求也会因 `FileExistsError` 转为同一个冲突错误。
-3. API 将该错误映射为 HTTP `409 Conflict`，响应体中的 `detail` 为“上传文件已存在，请修改文件名后重试: ...”。
+当前只有一个主 Prompt，模板为 `app/prompts/ingest.md`，其中嵌入
+`app/prompts/ingest_instructions.md`。它以单条 `user` message 发送给模型，组成顺序为：
 
-因此，以下情况会冲突：
+1. 固定 Ingest 角色和 JSON 输出合约。
+2. 完整 `wiki/index.md`。
+3. 完整 `wiki/overview.md`。
+4. 按修改时间倒序的最近五篇 `wiki/sources/*.md` 全文。
+5. 本次上传文档的完整 Markdown。
+6. 当天日期。
 
-- 已有 `raw/uploads/报告.pdf`，再次上传 `报告.pdf`。
-- 两个原始文件名在 `_safe_filename()` 后变为相同保存名，例如 `a b.pdf` 与 `a-b.pdf`。
+因此当前实现不是按相关性检索 Wiki，也不做来源文档的 chunk/reduce；`index.md`、
+`overview.md` 和最近五个 Source 越大，Prompt 就越大。
 
-扩展名、`auto_convert` 等基础校验发生在同名检查之前；不受支持的文件会先返回 `422`，而不是 `409`。
+Prompt 要求模型返回一个 JSON 对象：成功结果包含 `title`、`slug`、完整
+`source_page`、`index_entry`、可选 `entity_pages`/`concept_pages`、`contradictions` 和
+`log_entry`；无法可靠处理时返回 `ingest_status="failed"` 与 `ingest_error`。
 
-定时同步使用独立边界：`trigger=scheduled` 会为暂存文件追加随机 UUID，同名源文件由
-`scheduled_ingest_sources` 的源根目录、相对路径和文件身份负责幂等判断，而不是依赖
-`raw/uploads/` 的人工上传同名冲突规则。
+说明文件中曾描述“高层综合有实质变化时可返回 `overview_update`”，但外层 JSON 合约明确要求
+始终为 `null`。后端仍会接受非空 `overview_update`，并直接覆盖 `wiki/overview.md`。
 
-### 转换 Markdown 的独立边界
+## 4. 模型档案与思考模式
 
-当前同名冲突检查仅覆盖上传的**源文件**。非 Markdown 的转换结果由
-`source.with_suffix(".md")` 得出，并通过原子替换写入；该转换目标目前不会先进行
-同名冲突检查。
+Ingest 只接受服务端白名单模型：
 
-例如：`raw/uploads/报告.pdf` 不存在但 `raw/uploads/报告.md` 已存在时，上传
-`报告.pdf` 可以通过源文件冲突检查，转换阶段会覆盖现有的 `报告.md`。这与“源文件
-同名上传返回 409”是两个独立的行为边界。
+| 模型标识 | 思考模式 | 本地上下文预检 |
+| --- | --- | --- |
+| `deepseek/deepseek-v4-flash` | 强制关闭 | 不做本地硬限制 |
+| `deepseek/deepseek-v4-pro` | 强制关闭 | 不做本地硬限制 |
+| `ollama_chat/qwen3.6:35b` | 强制关闭 | 做 65,536 token 预算检查 |
 
-## 主要实现位置
+DeepSeek V4 的 Ingest profile 固定为 `reasoning_effort="none"`，并通过
+`extra_body={"thinking": {"type": "disabled"}}` 显式关闭供应商默认思考。原因是
+Ingest 的成功条件是得到一个完整、可机器解析的 JSON；思维链若与最终内容共用 completion
+预算，可能在 JSON 输出前耗尽预算。
 
-- `app/main.py`：服务生命周期中创建 `IngestService`。
-- `app/api/ingest.py`：`POST /api/ingest/jobs`、任务查询路由及 HTTP 错误映射。
-- `app/services/ingest_service.py`：上传校验、队列 worker、转换、LLM 提取、Wiki 写入和同名处理。
-- `app/storage/mysql.py`：`ingest_jobs` 创建、进度更新、成功和失败状态持久化。
-- `app/schemas/ingest.py`：任务状态、阶段、LLM 返回结构和 API 响应模型。
-- `app/prompts/ingest.md`：入库使用的 LLM 输出契约。
+Qwen Ingest 同样固定为 `reasoning_effort="none"`。这仅限当前结构化写入调用；当前代码
+没有另行实现“可思考的分析阶段 + 直答写入阶段”。
+
+调用统一经过 LiteLLM，关键参数为：
+
+```python
+completion(
+    model="<provider>/<model>",
+    messages=[{"role": "user", "content": prompt}],
+    max_tokens=WIKI_BACKEND_INGEST_LLM_MAX_TOKENS,
+    temperature=WIKI_BACKEND_LLM_MAIN_TEMPERATURE,
+)
+```
+
+当前默认输出预算为 `WIKI_BACKEND_INGEST_LLM_MAX_TOKENS=8192`。这是一整次
+completion 的输出上限，必须容纳 Source、Entity、Concept、索引项和日志项的全部 JSON。
+
+## 5. Token 预算和上下文检查
+
+模型调用前会执行 `_assert_prompt_fits_model_context()`：
+
+- DeepSeek V4 profile 没有写死本地 context capability，因此只记录
+  `unbounded_provider_managed`，不估算、不截断、不在本地拒绝 Prompt。供应商仍会执行自己的
+  上下文限制；“本地不检查”不等于“输入无限”。
+- Qwen profile 使用保守估算：中日韩等非 ASCII 字符约按 1 字符/1 token，ASCII 字母数字约按
+  4 字符/1 token。要求输入不超过 49,152，且：
+
+  ```text
+  估算输入 + Ingest 输出预算 + 8,192 安全余量 <= 65,536
+  ```
+
+  不满足时，在调用模型前以 `ingest_source_context_too_large` 失败。
+
+当前没有针对 DeepSeek 的本地 input token 硬预算，也没有在最终 `render_prompt()` 后做
+供应商 tokenizer 的精确复核。
+
+## 6. JSON 解析、截断和重试
+
+收到模型响应后，后端会：
+
+1. 记录 `finish_reason`、最终内容长度及是否存在推理字段，但不记录推理正文。
+2. `finish_reason="length"` 时立即标记为输出截断。
+3. 去掉最外层可选 JSON Markdown fence，从第一个 `{` 用 `raw_decode()` 解析对象。
+4. 使用 Pydantic `IngestLLMResult` 或 `IngestLLMFailure` 校验业务结构。
+
+异常处理如下：
+
+| 情况 | 行为 |
+| --- | --- |
+| `finish_reason=length` 或明显未闭合 JSON | 不修复，任务失败；若有部分内容，保存 `*.truncated.llm-response.txt` |
+| 网络超时、连接错误、429、5xx、空最终内容 | 等待 0.25 秒后重试一次 |
+| 非截断的无效 JSON | 保存初始响应，构造 JSON repair Prompt，再调用模型一次 |
+| repair 后仍无效 | 任务失败，保存 retry 响应 |
+| JSON 结构不符合 Pydantic | 任务失败，保存 `*.schema.llm-response.txt` |
+
+JSON repair 会带上原主 Prompt 和无效响应，要求“只修复结构、不增加事实”；它不是独立的
+小 Prompt，因此大文档场景会再次占用较大的上下文。
+
+当前没有使用供应商 `response_format`、JSON Schema 或 function calling 来约束模型输出；
+约束来自 Prompt、JSON 解析和 Pydantic 后验校验。
+
+## 7. Wiki 写入和后处理校验
+
+Pydantic 校验成功后，在 `wiki_lock` 内执行写入：
+
+1. `slug` 必须匹配受限字符规则，新的 Source 页面不得覆盖已有 `wiki/sources/<slug>.md`。
+2. Entity/Concept 页面必须是对应目录下的 `.md`，拒绝绝对路径、`..` 等越界路径。
+3. 通过临时文件替换进行原子写入。
+4. Source Frontmatter 由后端纠正：强制 `title/type/tags/date`，manual 只保留 `source_file`，
+   scheduled 只保留 `source_url`。
+5. `index_entry` 只插入 `wiki/index.md` 的 `## Sources`。
+6. `log_entry` 写入 `wiki/log.md`；若 `overview_update` 非空则覆盖 `wiki/overview.md`。
+
+写完后，`_validate_ingest()` 仅检查本次知识页：
+
+- 页面中的 `[[Wikilink]]` 目标是否存在；
+- 页面文件名是否出现在 `index.md` 的全文。
+
+校验结果保存到任务的 `validation.broken_links` 和 `validation.unindexed`，但当前不会因为
+断链或未索引而回滚或标记任务失败。由于只自动插入 Source 的 index entry，模型创建的
+Entity/Concept 页面可能出现 `unindexed`，但任务仍是 `succeeded`。
+
+## 8. 成功、失败和发布
+
+成功时，后端写入创建/更新页面、矛盾列表和校验结果，将任务标记为：
+
+```text
+status=succeeded
+stage=completed
+progress_percent=100
+```
+
+若 `PublishService` 可用，随后将该 job 加入 Quartz 的合并发布队列。发布异步进行，不能把
+Ingest 的 `succeeded` 解释为站点已更新。
+
+任意未处理异常都会标记 job 为 `failed`，保留失败前的阶段和进度，并删除该任务 `source_path`
+指向的上传文件。转换出的 Markdown 与模型诊断文件不等于 `source_path`，不会由这一清理逻辑
+统一删除。
+
+## 当前实现的边界
+
+- 单次完整 Prompt、单次主生成；没有长文分块、分阶段抽取、reduce 或事实草稿。
+- Wiki 上下文采用固定“完整 index + 完整 overview + 最近五 Source”，不是相关性检索。
+- DeepSeek 没有本地输入 token 硬上限；输出只有单次 completion 上限。
+- JSON 依靠 Prompt 和后验解析/Pydantic；没有供应商级 JSON Schema 约束。
+- 链接和索引校验是报告型，不是阻断型质量门。
+- 队列为当前进程内存队列，不能替代持久化、可恢复的任务调度。

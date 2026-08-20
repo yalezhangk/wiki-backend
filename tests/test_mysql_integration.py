@@ -257,7 +257,7 @@ class MySQLIntegrationTests(unittest.TestCase):
                     FROM information_schema.COLUMNS
                     WHERE TABLE_SCHEMA = %s
                       AND TABLE_NAME = 'ingest_jobs'
-                      AND COLUMN_NAME IN ('document_name_key', 'source_url')
+                       AND COLUMN_NAME IN ('document_name_key', 'source_url', 'ingest_model')
                     """,
                     (settings.mysql_database,),
                 )
@@ -274,9 +274,10 @@ class MySQLIntegrationTests(unittest.TestCase):
                 )
                 index = cursor.fetchone()
 
-        self.assertEqual(set(columns), {"document_name_key", "source_url"})
+        self.assertEqual(set(columns), {"document_name_key", "source_url", "ingest_model"})
         self.assertEqual(columns["document_name_key"]["COLUMN_TYPE"], "varchar(255)")
         self.assertEqual(columns["source_url"]["COLUMN_TYPE"], "varchar(2048)")
+        self.assertEqual(columns["ingest_model"]["COLUMN_TYPE"], "varchar(255)")
         self.assertTrue(all(column["IS_NULLABLE"] == "YES" for column in columns.values()))
         self.assertIsNotNone(index)
         assert index is not None

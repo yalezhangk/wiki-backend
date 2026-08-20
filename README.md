@@ -94,7 +94,10 @@ Copy-Item .env.example .env
 | --- | --- |
 | `WIKI_AGENT_REPO_PATH` | 共享 Wiki 数据所在的 agent 仓库根目录，默认 `../llm-wiki-agent` |
 | `WIKI_BACKEND_MYSQL_*` | MySQL 主机、端口、用户、密码和数据库 |
-| `WIKI_BACKEND_LLM_PROVIDER` | 默认模型提供方 |
+| `WIKI_BACKEND_LLM_PROVIDER` | 默认模型提供方，供 Query 和维护等内部任务使用 |
+| `WIKI_BACKEND_INGEST_PROVIDER` / `WIKI_BACKEND_INGEST_MODEL` | Ingest 专用服务端白名单模型，默认 DeepSeek V4 Pro；不由浏览器请求决定 |
+| `WIKI_BACKEND_INGEST_LLM_MAX_TOKENS` | Ingest 单次完整 JSON 响应的最大输出 token，默认 8192 |
+| `WIKI_BACKEND_INGEST_REASONING_EFFORT` | 兼容配置项；Ingest 的 DeepSeek 与本地 `qwen3.6:35b` 均固定为 `none`，以确保完整 JSON 输出 |
 | `WIKI_BACKEND_DEEPSEEK_API_KEY` | DeepSeek API 密钥 |
 | `WIKI_BACKEND_DEEPSEEK_API_BASE` | DeepSeek API 地址 |
 | `WIKI_BACKEND_OLLAMA_API_BASE` | Ollama 地址，DGX 同机通常为 `http://127.0.0.1:11434` |

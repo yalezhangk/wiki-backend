@@ -55,6 +55,18 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias="WIKI_BACKEND_INGEST_LLM_MAX_TOKENS",
     )
+    ingest_provider: str = Field(
+        default="deepseek",
+        validation_alias="WIKI_BACKEND_INGEST_PROVIDER",
+    )
+    ingest_model: str = Field(
+        default="deepseek-v4-pro",
+        validation_alias="WIKI_BACKEND_INGEST_MODEL",
+    )
+    ingest_reasoning_effort: str | None = Field(
+        default=None,
+        validation_alias="WIKI_BACKEND_INGEST_REASONING_EFFORT",
+    )
     ingest_enable_marker_ocr: bool = Field(
         default=False,
         validation_alias="WIKI_BACKEND_INGEST_ENABLE_MARKER_OCR",

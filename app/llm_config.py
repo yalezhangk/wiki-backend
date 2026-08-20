@@ -25,6 +25,24 @@ class LLMProfile:
     reasoning_effort: str | None = None
 
 
+@dataclass(frozen=True)
+class IngestModelCapabilities:
+    """Ingest 模型已确认的本地 prompt 预算；None 表示由供应商管理。"""
+
+    max_input_tokens: int | None = None
+    context_window_tokens: int | None = None
+    context_safety_margin_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class IngestModelProfile:
+    """一次 Ingest 任务可使用的服务器受控模型与预算能力。"""
+
+    model_identifier: str
+    llm_profile: LLMProfile
+    capabilities: IngestModelCapabilities
+
+
 class LLMConfigError(RuntimeError):
     """Raised when the backend LLM client cannot return usable text."""
 
@@ -80,6 +98,59 @@ def _resolve_api_base(provider: str) -> str | None:
     return settings.legacy_llm_api_base
 
 
+def resolve_ingest_model_profile(model_identifier: str | None = None) -> IngestModelProfile:
+    """解析 Ingest 专用白名单模型，拒绝由环境变量任意指定的提供商或模型。"""
+
+    configured_identifier = (
+        model_identifier
+        or f"{settings.ingest_provider.strip()}/{settings.ingest_model.strip()}"
+    )
+    profiles = {
+        "deepseek/deepseek-v4-pro": IngestModelCapabilities(),
+        "deepseek/deepseek-v4-flash": IngestModelCapabilities(),
+        "ollama_chat/qwen3.6:35b": IngestModelCapabilities(
+            max_input_tokens=49152,
+            context_window_tokens=65536,
+            context_safety_margin_tokens=8192,
+        ),
+    }
+    capabilities = profiles.get(configured_identifier)
+    if capabilities is None:
+        raise LLMConfigError(f"unsupported ingest model: {configured_identifier}")
+
+    provider, model = configured_identifier.split("/", 1)
+    reasoning_effort = settings.ingest_reasoning_effort
+    if configured_identifier.startswith("deepseek/"):
+        # Ingest requires one complete machine-parsed JSON object. DeepSeek's
+        # default thinking can consume the full completion budget before it
+        # emits any final content, so this workflow must stay direct.
+        reasoning_effort = "none"
+    if configured_identifier == "ollama_chat/qwen3.6:35b":
+        if reasoning_effort not in {None, "", "none"}:
+            raise LLMConfigError("qwen3.6:35b ingest requires reasoning_effort=none")
+        reasoning_effort = "none"
+    if (
+        capabilities.context_window_tokens is not None
+        and settings.ingest_llm_max_tokens + capabilities.context_safety_margin_tokens
+        > capabilities.context_window_tokens
+    ):
+        raise LLMConfigError("ingest output and safety budget exceed the model context window")
+
+    return IngestModelProfile(
+        model_identifier=configured_identifier,
+        llm_profile=LLMProfile(
+            provider=provider,
+            model=model,
+            api_key=_resolve_api_key(provider),
+            api_base=_resolve_api_base(provider),
+            max_tokens=settings.ingest_llm_max_tokens,
+            temperature=settings.llm_main_temperature,
+            reasoning_effort=reasoning_effort or None,
+        ),
+        capabilities=capabilities,
+    )
+
+
 def call_llm(
     prompt: str,
     *,
@@ -133,6 +204,14 @@ def call_llm_profile(
         kwargs["api_base"] = profile.api_base
     if profile.reasoning_effort is not None:
         kwargs["reasoning_effort"] = profile.reasoning_effort
+    if (
+        profile.provider.strip().lower() == "deepseek"
+        and profile.reasoning_effort == "none"
+    ):
+        # DeepSeek V4 enables thinking by default. LiteLLM maps
+        # reasoning_effort="none" by omitting the field, so send the
+        # provider's explicit switch through its OpenAI-compatible extra body.
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
     reasoning_effort = profile.reasoning_effort or "provider_default"
     started_at = time.monotonic()

@@ -1,7 +1,7 @@
 You are maintaining an LLM Wiki. Process this source document and integrate its knowledge into the Wiki.
 
-Wiki schema and conventions:
-${schema}
+Ingest instructions:
+${ingest_instructions}
 
 Current Wiki state:
 ${wiki_context}
@@ -35,7 +35,7 @@ Otherwise return this successful result:
   "slug": "kebab-case-slug-for-filename",
   "source_page": "full Markdown content for wiki/sources/<slug>.md with useful inline [[Wikilinks]]",
   "index_entry": "- [Title](sources/slug.md) - one-line summary",
-  "overview_update": "full updated content for wiki/overview.md, or null if no update is warranted",
+  "overview_update": null,
   "entity_pages": [
     {"path": "entities/EntityName.md", "content": "full Markdown content"}
   ],
@@ -46,11 +46,8 @@ Otherwise return this successful result:
   "log_entry": "## [${today}] ingest | <title>\n\nAdded source. Key claims: ..."
 }
 
-Important:
+Response contract:
 - `source_page` must start with complete YAML Frontmatter. Its `title` must equal the top-level `title`, and it must include `type: source`, `tags`, and `date` before the closing `---`.
 - The backend assigns the final `source_file` or `source_url`; do not rely on either field to replace the required Frontmatter fields above.
-- Set `"overview_update"` to the complete updated `wiki/overview.md` only when the source materially changes the high-level synthesis; otherwise return `null`.
-- Keep generated entity and concept pages focused.
-- Prefer a complete source page, index entry, contradiction list, and log entry.
-- Never claim success when the source content is unreadable or insufficient.
+- Always set `"overview_update"` to `null`. Do not rewrite or reproduce `wiki/overview.md` in this response.
 - Return complete JSON that can be parsed by `json.loads`.

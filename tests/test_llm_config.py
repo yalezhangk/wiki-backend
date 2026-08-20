@@ -15,6 +15,7 @@ from app.llm_config import (
     _resolve_model,
     call_llm_profile,
     call_llm_fast,
+    resolve_ingest_model_profile,
 )
 
 
@@ -107,6 +108,36 @@ class LLMConfigTests(unittest.TestCase):
 
         self.assertEqual(result, "answer")
         self.assertEqual(completion_mock.call_args.kwargs["api_base"], "https://api.deepseek.com")
+
+    def test_deepseek_ingest_disables_thinking_for_complete_json_output(self) -> None:
+        with patch.object(settings, "ingest_reasoning_effort", None):
+            profile = resolve_ingest_model_profile("deepseek/deepseek-v4-flash")
+
+        self.assertEqual(profile.llm_profile.reasoning_effort, "none")
+
+    @patch("app.llm_config.completion")
+    def test_deepseek_direct_profile_explicitly_disables_thinking(
+        self,
+        completion_mock: Mock,
+    ) -> None:
+        completion_mock.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="{}"), finish_reason="stop")]
+        )
+        profile = LLMProfile(
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            api_key="test-key",
+            api_base="https://api.deepseek.com",
+            max_tokens=8192,
+            temperature=0.2,
+            reasoning_effort="none",
+        )
+
+        self.assertEqual(call_llm_profile("prompt", profile), "{}")
+        self.assertEqual(
+            completion_mock.call_args.kwargs["extra_body"],
+            {"thinking": {"type": "disabled"}},
+        )
 
     @patch("app.llm_config.completion")
     def test_empty_llm_response_is_rejected(self, completion_mock: Mock) -> None:

@@ -81,6 +81,10 @@ class IngestJobResponse(BaseModel):
         default=None,
         description="scheduled 任务对应的 http/https 原始文档 URL；manual 任务恒为 null。",
     )
+    ingest_model: str | None = Field(
+        default=None,
+        description="创建任务时选定的服务端 Ingest 模型标识；历史任务可能为空。",
+    )
     created_pages: list[str] = Field(
         default_factory=list,
         description="本任务创建的 Wiki 根目录相对路径列表。",

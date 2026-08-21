@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import math
 import re
 import shutil
 import subprocess
@@ -29,12 +29,23 @@ from app.llm_config import (
 from app.prompts import load_prompt, render_prompt
 from app.schemas.ingest import (
     IngestJobResponse,
+    IngestGeneratedPage,
+    IngestIndexEntry,
     IngestLLMFailure,
     IngestLLMResult,
+    IngestPagePatch,
     IngestTrigger,
     IngestValidation,
 )
 from app.services.publish_service import PublishService
+from app.services.ingest_context import (
+    SMALL_SOURCE_MAX_TOKENS,
+    WIKI_CONTEXT_MAX_TOKENS,
+    PromptBudget,
+    TokenEstimator,
+    WikiContextRetriever,
+    WikiSnapshot,
+)
 from app.services.ingest_document_name import normalize_document_name
 from app.services.wiki_page_policy import iter_knowledge_pages
 from app.storage.mysql import DuplicateDocumentNameError
@@ -455,7 +466,12 @@ class IngestService:
                 ) from ocr_error
         self._update_progress(job_id, "extracting", 35)
         ingest_profile = self._resolve_ingest_profile(job.ingest_model)
-        prompt = self._build_prompt(source=source, source_content=source_content)
+        self._assert_source_is_direct_ingestable(source_content)
+        prompt, selected_page_hashes = self._build_prompt_with_snapshot(
+            source=source,
+            source_content=source_content,
+            ingest_profile=ingest_profile,
+        )
         self._assert_prompt_fits_model_context(prompt=prompt, ingest_profile=ingest_profile)
         try:
             raw = self._call_llm_with_retry(prompt, ingest_profile=ingest_profile)
@@ -509,7 +525,11 @@ class IngestService:
 
         self._update_progress(job_id, "writing_wiki", 65)
         with self._wiki_lock:
-            created_pages, updated_pages, changed_knowledge_pages = self._write_ingest_result(job, data)
+            created_pages, updated_pages, changed_knowledge_pages = self._write_ingest_result(
+                job,
+                data,
+                selected_page_hashes=selected_page_hashes,
+            )
         self._update_progress(job_id, "validating", 85)
         validation = self._validate_ingest(changed_knowledge_pages)
 
@@ -588,10 +608,13 @@ class IngestService:
 
         selected_profile = ingest_profile or self._resolve_ingest_profile()
         repair_prompt = (
-            f"{prompt}\n\n"
-            "The response below could not be parsed as a JSON object. Repair its JSON "
-            "structure while preserving its information, then return the complete result as raw JSON only. "
+            "Repair the invalid response below into one JSON object matching the Ingest result contract. "
+            "Only repair JSON structure; do not add facts, pages, claims, or content not present in the invalid response. "
             "Do not include markdown fences, explanations, apologies, analysis, or any text outside the JSON object."
+            " Required top-level fields for success are ingest_status, ingest_error, title, slug, source_page, "
+            "index_entry, overview_update, entity_pages, concept_pages, entity_index_entries, concept_index_entries, "
+            "entity_patches, concept_patches, "
+            "contradictions, and log_entry."
             "\n\n=== INVALID RESPONSE START ===\n"
             f"{raw}\n"
             "=== INVALID RESPONSE END ==="
@@ -619,6 +642,8 @@ class IngestService:
         self,
         job: IngestJobResponse,
         data: IngestLLMResult,
+        *,
+        selected_page_hashes: dict[str, str] | None = None,
     ) -> tuple[list[str], list[str], list[str]]:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", data.slug):
             raise IngestServiceError(f"invalid generated source slug: {data.slug}")
@@ -641,13 +666,36 @@ class IngestService:
 
         for page in data.entity_pages:
             self._assert_allowed_wiki_output(page.path, "entities")
+            if (self._wiki_dir / page.path).exists():
+                raise IngestConflictError(f"既有 Entity 页面必须使用受控 patch: {page.path}")
             generated_pages.append((page.path, page.content))
 
         for page in data.concept_pages:
             self._assert_allowed_wiki_output(page.path, "concepts")
+            if (self._wiki_dir / page.path).exists():
+                raise IngestConflictError(f"既有 Concept 页面必须使用受控 patch: {page.path}")
             generated_pages.append((page.path, page.content))
 
-        changed_knowledge_pages = list(dict.fromkeys(path for path, _ in generated_pages))
+        for patch in data.entity_patches:
+            self._assert_allowed_wiki_output(patch.path, "entities")
+        for patch in data.concept_patches:
+            self._assert_allowed_wiki_output(patch.path, "concepts")
+        patch_pages = self._apply_existing_page_patches(
+            patches=[*data.entity_patches, *data.concept_patches],
+            selected_page_hashes=selected_page_hashes or {},
+        )
+        entity_index_entries = self._validate_generated_page_index_entries(
+            pages=data.entity_pages,
+            entries=data.entity_index_entries,
+            directory="entities",
+        )
+        concept_index_entries = self._validate_generated_page_index_entries(
+            pages=data.concept_pages,
+            entries=data.concept_index_entries,
+            directory="concepts",
+        )
+
+        changed_knowledge_pages = list(dict.fromkeys([*(path for path, _ in generated_pages), *patch_pages]))
         changed_pages = [*changed_knowledge_pages, "index.md", "log.md"]
         if data.overview_update:
             changed_pages.append("overview.md")
@@ -658,14 +706,87 @@ class IngestService:
 
         for path, content in generated_pages:
             self._atomic_write(self._wiki_dir / path, content)
+        for path, content in patch_pages.items():
+            self._atomic_write(self._wiki_dir / path, content)
 
         if data.overview_update:
             self._atomic_write(self._overview_file, data.overview_update)
-        self._update_index(data.index_entry)
+        self._update_index(data.index_entry, section="Sources")
+        for entry in entity_index_entries:
+            self._update_index(entry, section="Entities")
+        for entry in concept_index_entries:
+            self._update_index(entry, section="Concepts")
         self._append_log(data.log_entry)
         created_pages = [path for path in changed_pages if not existed_before[path]]
         updated_pages = [path for path in changed_pages if existed_before[path]]
         return created_pages, updated_pages, changed_knowledge_pages
+
+    def _validate_generated_page_index_entries(
+        self,
+        *,
+        pages: list[IngestGeneratedPage],
+        entries: list[IngestIndexEntry],
+        directory: str,
+    ) -> list[str]:
+        page_paths = {page.path for page in pages}
+        indexed_paths = [entry.path for entry in entries]
+        if len(indexed_paths) != len(set(indexed_paths)):
+            raise IngestServiceError(f"{directory} 索引条目不能重复")
+        if set(indexed_paths) != page_paths:
+            raise IngestServiceError(f"每个新建 {directory} 页面必须有且仅有一个索引条目")
+        validated_entries: list[str] = []
+        for entry in entries:
+            self._assert_allowed_wiki_output(entry.path, directory)
+            normalized_entry = entry.entry.strip()
+            if not normalized_entry.startswith("- ") or f"]({entry.path})" not in normalized_entry:
+                raise IngestServiceError(f"{directory} 索引条目必须链接到对应页面: {entry.path}")
+            validated_entries.append(normalized_entry)
+        return validated_entries
+
+    def _apply_existing_page_patches(
+        self,
+        *,
+        patches: list[IngestPagePatch],
+        selected_page_hashes: dict[str, str],
+    ) -> dict[str, str]:
+        patched_pages: dict[str, str] = {}
+        seen_targets: set[tuple[str, str]] = set()
+        for patch in patches:
+            target = self._wiki_dir / patch.path
+            if not target.is_file():
+                raise IngestConflictError(f"受控 patch 只能更新已存在页面: {patch.path}")
+            expected_hash = selected_page_hashes.get(patch.path)
+            if expected_hash is None:
+                raise IngestConflictError(f"受控 patch 的页面未出现在本次检索快照中: {patch.path}")
+            if patch.base_hash != expected_hash:
+                raise IngestConflictError(f"受控 patch 的快照 hash 不匹配: {patch.path}")
+            if (patch.path, patch.heading) in seen_targets:
+                raise IngestServiceError(f"同一页面小节不能重复 patch: {patch.path}#{patch.heading}")
+            seen_targets.add((patch.path, patch.heading))
+            current_content = patched_pages.get(patch.path, self._read_text(target))
+            current_hash = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
+            if current_hash != expected_hash and patch.path not in patched_pages:
+                raise IngestConflictError(f"页面在检索后已变化，拒绝过期 patch: {patch.path}")
+            patched_pages[patch.path] = self._apply_page_patch(current_content, patch)
+        return patched_pages
+
+    @staticmethod
+    def _apply_page_patch(content: str, patch: IngestPagePatch) -> str:
+        heading = patch.heading.strip().lstrip("#").strip()
+        if patch.operation == "replace_section" and heading.casefold() in {"related", "sources"}:
+            raise IngestConflictError(f"受保护小节不能替换: {patch.path}#{heading}")
+        section_heading = f"## {heading}"
+        heading_pattern = re.compile(rf"^{re.escape(section_heading)}[ \t]*$", re.MULTILINE)
+        match = heading_pattern.search(content)
+        if patch.operation == "append_section":
+            if match is not None:
+                raise IngestConflictError(f"目标小节已存在，不能追加: {patch.path}#{heading}")
+            return f"{content.rstrip()}\n\n{section_heading}\n\n{patch.content.strip()}\n"
+        if match is None:
+            raise IngestConflictError(f"目标小节不存在，不能替换: {patch.path}#{heading}")
+        next_heading = re.compile(r"^##\s+.+$", re.MULTILINE).search(content, match.end())
+        section_end = next_heading.start() if next_heading is not None else len(content)
+        return f"{content[:match.end()]}\n\n{patch.content.strip()}\n{content[section_end:]}"
 
     async def _save_upload(self, *, file: UploadFile, target_path: Path, suffix: str) -> None:
         content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
@@ -739,36 +860,91 @@ class IngestService:
             except (KeyError, zipfile.BadZipFile) as exc:
                 raise IngestValidationError("file content does not match .epub extension") from exc
 
-    def _build_prompt(self, *, source: Path, source_content: str) -> str:
+    def _build_prompt(
+        self,
+        *,
+        source: Path,
+        source_content: str,
+        ingest_profile: IngestModelProfile | None = None,
+    ) -> str:
+        prompt, _ = self._build_prompt_with_snapshot(
+            source=source,
+            source_content=source_content,
+            ingest_profile=ingest_profile,
+        )
+        return prompt
+
+    def _build_prompt_with_snapshot(
+        self,
+        *,
+        source: Path,
+        source_content: str,
+        ingest_profile: IngestModelProfile | None = None,
+    ) -> tuple[str, dict[str, str]]:
         source_label = source.relative_to(self._agent_root).as_posix()
+        profile = ingest_profile or self._resolve_ingest_profile()
+        empty_prompt = self._render_ingest_prompt(
+            source_label=source_label,
+            source_content=source_content,
+            wiki_context="(no relevant existing Wiki evidence was retrieved)",
+        )
+        available_wiki_tokens = min(
+            WIKI_CONTEXT_MAX_TOKENS,
+            profile.capabilities.max_input_tokens - TokenEstimator.estimate(empty_prompt),
+        )
+        with self._wiki_lock:
+            snapshot = WikiSnapshot.capture(self._wiki_dir)
+        selected, skipped = WikiContextRetriever(snapshot).select(source_content, available_wiki_tokens)
+        budget = PromptBudget(
+            max_input_tokens=profile.capabilities.max_input_tokens,
+            max_output_tokens=self._ingest_llm_max_tokens,
+            safety_margin_tokens=profile.capabilities.context_safety_margin_tokens,
+            context_window_tokens=profile.capabilities.context_window_tokens,
+        )
+        while selected:
+            rendered_context = WikiContextRetriever.render(selected)
+            rendered_prompt = self._render_ingest_prompt(
+                source_label=source_label,
+                source_content=source_content,
+                wiki_context=rendered_context,
+            )
+            if budget.accepts_input(TokenEstimator.estimate(rendered_prompt)):
+                break
+            removed = min(selected, key=lambda item: (item.score, item.path, item.heading))
+            selected.remove(removed)
+            skipped.append(f"final_budget_exhausted:{removed.path}:{removed.heading}")
+        LOGGER.info(
+            "Ingest Wiki context selected model=%s available_wiki_tokens=%s selected=%s skipped=%s",
+            profile.model_identifier,
+            available_wiki_tokens,
+            [(item.path, item.heading, item.score, item.snapshot_hash[:12]) for item in selected],
+            skipped,
+        )
+        prompt = self._render_ingest_prompt(
+            source_label=source_label,
+            source_content=source_content,
+            wiki_context=WikiContextRetriever.render(selected),
+        )
+        return prompt, {item.path.removeprefix("wiki/"): item.snapshot_hash for item in selected}
+
+    @staticmethod
+    def _assert_source_is_direct_ingestable(source_content: str) -> None:
+        if TokenEstimator.estimate(source_content) > SMALL_SOURCE_MAX_TOKENS:
+            raise IngestContentQualityError(
+                "ingest_source_context_too_large",
+                "转换后的 Markdown 超过单次完整来源 Ingest 的上下文上限。",
+            )
+
+    @staticmethod
+    def _render_ingest_prompt(*, source_label: str, source_content: str, wiki_context: str) -> str:
         return render_prompt(
             "ingest.md",
             ingest_instructions=load_prompt("ingest_instructions.md"),
-            wiki_context=self._build_wiki_context() or "(wiki is empty - this is the first source)",
+            wiki_context=wiki_context,
             source_label=source_label,
             source_content=source_content,
             today=date.today().isoformat(),
         )
-
-    def _build_wiki_context(self) -> str:
-        parts: list[str] = []
-        if self._index_file.exists():
-            parts.append(f"## wiki/index.md\n{self._read_text(self._index_file)}")
-        if self._overview_file.exists():
-            parts.append(f"## wiki/overview.md\n{self._read_text(self._overview_file)}")
-        sources_dir = self._wiki_dir / "sources"
-        if sources_dir.exists():
-            recent_sources = sorted(
-                sources_dir.glob("*.md"),
-                key=lambda path: path.stat().st_mtime,
-                reverse=True,
-            )[:5]
-            for path in recent_sources:
-                parts.append(
-                    f"## {path.relative_to(self._agent_root).as_posix()}\n"
-                    f"{self._read_text(path)}"
-                )
-        return "\n\n---\n\n".join(parts)
 
     def _convert_to_markdown(self, source: Path) -> Path:
         try:
@@ -960,7 +1136,7 @@ class IngestService:
         with pdfplumber.open(source) as document:
             return [page.extract_text() or "" for page in document.pages]
 
-    def _update_index(self, new_entry: str) -> None:
+    def _update_index(self, new_entry: str, *, section: str) -> None:
         content = self._read_text(self._index_file)
         if not content:
             content = (
@@ -968,7 +1144,7 @@ class IngestService:
                 "## Overview\n- [Overview](overview.md) - living synthesis\n\n"
                 "## Sources\n\n## Entities\n\n## Concepts\n\n## Syntheses\n"
             )
-        heading = "## Sources"
+        heading = f"## {section}"
         if heading in content:
             content = content.replace(heading + "\n", heading + "\n" + new_entry + "\n", 1)
         else:
@@ -1096,13 +1272,6 @@ class IngestService:
         name = type(exc).__name__.lower()
         return "timeout" in name or "connection" in name or "ratelimit" in name
 
-    @staticmethod
-    def _estimate_prompt_tokens(prompt: str) -> int:
-        """按中日韩字符和 ASCII 单词分别估算，供本地 Qwen 的保守窗口预检使用。"""
-        ascii_word_characters = sum(character.isascii() and character.isalnum() for character in prompt)
-        other_characters = len(prompt) - ascii_word_characters
-        return other_characters + math.ceil(ascii_word_characters / 4)
-
     def _assert_prompt_fits_model_context(
         self,
         *,
@@ -1110,20 +1279,14 @@ class IngestService:
         ingest_profile: IngestModelProfile,
     ) -> None:
         capabilities = ingest_profile.capabilities
-        if capabilities.context_window_tokens is None:
-            LOGGER.info(
-                "Ingest prompt budget skipped model=%s budget_mode=unbounded_provider_managed",
-                ingest_profile.model_identifier,
-            )
-            return
-        input_tokens = self._estimate_prompt_tokens(prompt)
-        assert capabilities.max_input_tokens is not None
-        assert capabilities.context_safety_margin_tokens is not None
-        if (
-            input_tokens > capabilities.max_input_tokens
-            or input_tokens + self._ingest_llm_max_tokens + capabilities.context_safety_margin_tokens
-            > capabilities.context_window_tokens
-        ):
+        input_tokens = TokenEstimator.estimate(prompt)
+        budget = PromptBudget(
+            max_input_tokens=capabilities.max_input_tokens,
+            max_output_tokens=self._ingest_llm_max_tokens,
+            safety_margin_tokens=capabilities.context_safety_margin_tokens,
+            context_window_tokens=capabilities.context_window_tokens,
+        )
+        if not budget.accepts_input(input_tokens):
             raise IngestContentQualityError(
                 "ingest_source_context_too_large",
                 "文档与当前 Wiki 上下文超过本地 Ingest 模型的可用上下文窗口。",

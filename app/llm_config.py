@@ -27,11 +27,12 @@ class LLMProfile:
 
 @dataclass(frozen=True)
 class IngestModelCapabilities:
-    """Ingest 模型已确认的本地 prompt 预算；None 表示由供应商管理。"""
+    """Ingest 模型已确认的服务端受控 prompt 预算。"""
 
-    max_input_tokens: int | None = None
-    context_window_tokens: int | None = None
-    context_safety_margin_tokens: int | None = None
+    max_input_tokens: int
+    max_output_tokens: int
+    context_window_tokens: int
+    context_safety_margin_tokens: int
 
 
 @dataclass(frozen=True)
@@ -106,10 +107,11 @@ def resolve_ingest_model_profile(model_identifier: str | None = None) -> IngestM
         or f"{settings.ingest_provider.strip()}/{settings.ingest_model.strip()}"
     )
     profiles = {
-        "deepseek/deepseek-v4-pro": IngestModelCapabilities(),
-        "deepseek/deepseek-v4-flash": IngestModelCapabilities(),
+        "deepseek/deepseek-v4-pro": IngestModelCapabilities(131072, 16384, 1000000, 16384),
+        "deepseek/deepseek-v4-flash": IngestModelCapabilities(98304, 8192, 1000000, 8192),
         "ollama_chat/qwen3.6:35b": IngestModelCapabilities(
             max_input_tokens=49152,
+            max_output_tokens=8192,
             context_window_tokens=65536,
             context_safety_margin_tokens=8192,
         ),
@@ -129,11 +131,9 @@ def resolve_ingest_model_profile(model_identifier: str | None = None) -> IngestM
         if reasoning_effort not in {None, "", "none"}:
             raise LLMConfigError("qwen3.6:35b ingest requires reasoning_effort=none")
         reasoning_effort = "none"
-    if (
-        capabilities.context_window_tokens is not None
-        and settings.ingest_llm_max_tokens + capabilities.context_safety_margin_tokens
-        > capabilities.context_window_tokens
-    ):
+    if settings.ingest_llm_max_tokens > capabilities.max_output_tokens:
+        raise LLMConfigError("ingest output budget exceeds the model maximum output")
+    if settings.ingest_llm_max_tokens + capabilities.context_safety_margin_tokens > capabilities.context_window_tokens:
         raise LLMConfigError("ingest output and safety budget exceed the model context window")
 
     return IngestModelProfile(

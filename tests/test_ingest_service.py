@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import tempfile
 import unittest
@@ -19,9 +20,11 @@ from app.services.ingest_service import (
     IngestContentQualityError,
     IngestLLMInvalidJSONError,
     IngestLLMResponseTruncatedError,
+    IngestServiceError,
     IngestService,
     IngestValidationError,
 )
+from app.services.ingest_context import SMALL_SOURCE_MAX_TOKENS, PromptBudget, TokenEstimator
 from app.storage.mysql import DuplicateDocumentNameError, MySQLStorage
 
 
@@ -484,6 +487,30 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(parsed["slug"], "report")
         self.assertTrue((source_path.parent / "report.1.initial.llm-response.txt").exists())
 
+    def test_json_repair_prompt_excludes_original_main_prompt(self) -> None:
+        source_path = self.agent_root / "raw" / "uploads" / "report.md"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("# Report", encoding="utf-8")
+        prompts: list[str] = []
+        payload = (
+            '{"ingest_status":"succeeded","ingest_error":null,"title":"Report","slug":"report",'
+            '"source_page":"# Report","index_entry":"- [Report](sources/report.md)",'
+            '"overview_update":null,"entity_pages":[],"concept_pages":[],"contradictions":[],"log_entry":"## log"}'
+        )
+        self.service._call_llm_main = lambda prompt, max_tokens=None: prompts.append(prompt) or payload  # type: ignore[method-assign]
+
+        self.service._parse_llm_result_with_repair(
+            prompt="=== SOURCE START ===\nsecret source\n=== SOURCE END ===",
+            raw="not json",
+            source_path=source_path,
+            job_id=1,
+        )
+
+        self.assertEqual(len(prompts), 1)
+        self.assertNotIn("=== SOURCE START ===", prompts[0])
+        self.assertNotIn("secret source", prompts[0])
+        self.assertIn("not json", prompts[0])
+
     def test_parse_truncated_json_is_not_sent_to_json_repair(self) -> None:
         source_path = self.agent_root / "raw" / "uploads" / "report.md"
         source_path.parent.mkdir(parents=True)
@@ -796,24 +823,74 @@ class IngestServiceTests(unittest.TestCase):
         self.assertIn('"ingest_status": "succeeded"', prompt)
         self.assertIn('"ingest_status": "failed"', prompt)
 
-    def test_build_wiki_context_keeps_complete_index_overview_and_recent_source(self) -> None:
+    def test_build_prompt_retrieves_only_relevant_snapshot_sections(self) -> None:
         index_path = self.agent_root / "wiki" / "index.md"
         overview_path = self.agent_root / "wiki" / "overview.md"
-        recent_source_path = self.agent_root / "wiki" / "sources" / "recent.md"
-        index_content = "index-start\n" + ("index-body\n" * 2000) + "index-end"
-        overview_content = "overview-start\n" + ("overview-body\n" * 2000) + "overview-end"
-        recent_source_content = "source-start\n" + ("source-body\n" * 2000) + "source-end"
-        index_path.write_text(index_content, encoding="utf-8")
+        related_path = self.agent_root / "wiki" / "entities" / "Graphite.md"
+        unrelated_path = self.agent_root / "wiki" / "sources" / "recent.md"
+        index_path.write_text("# Index\n- [Recent](sources/recent.md)", encoding="utf-8")
+        overview_content = "# Overview\n\n## Graphite battery\nGraphite improves battery anodes."
         overview_path.write_text(overview_content, encoding="utf-8")
-        recent_source_path.parent.mkdir(parents=True, exist_ok=True)
-        recent_source_path.write_text(recent_source_content, encoding="utf-8")
+        related_path.parent.mkdir(parents=True, exist_ok=True)
+        related_content = "# Graphite\n\n## Battery material\nGraphite battery anodes."
+        related_path.write_text(related_content, encoding="utf-8")
+        unrelated_path.parent.mkdir(parents=True, exist_ok=True)
+        unrelated_path.write_text("# Recent\n\n## Unrelated\nUnrelated material.", encoding="utf-8")
 
-        context = self.service._build_wiki_context()
+        prompt = self.service._build_prompt(
+            source=self.agent_root / "raw" / "uploads" / "manual" / "report.md",
+            source_content="# Graphite battery\n\nGraphite battery anode research.",
+        )
 
-        self.assertIn(index_content, context)
-        self.assertIn(overview_content, context)
-        self.assertIn(recent_source_content, context)
-        self.assertNotIn("[context clipped to", context)
+        self.assertIn("wiki/overview.md", prompt)
+        self.assertIn("wiki/entities/Graphite.md", prompt)
+        self.assertIn(hashlib.sha256(related_content.encode("utf-8")).hexdigest(), prompt)
+        self.assertNotIn("# Index\n- [Recent](sources/recent.md)", prompt)
+        self.assertNotIn("Unrelated material", prompt)
+        self.assertEqual(
+            prompt,
+            self.service._build_prompt(
+                source=self.agent_root / "raw" / "uploads" / "manual" / "report.md",
+                source_content="# Graphite battery\n\nGraphite battery anode research.",
+            ),
+        )
+
+    def test_build_prompt_uses_explicit_empty_context_for_zero_matches(self) -> None:
+        (self.agent_root / "wiki" / "sources").mkdir()
+        (self.agent_root / "wiki" / "sources" / "old.md").write_text(
+            "# Astronomy\n\n## Telescope\nOptical telescope.", encoding="utf-8"
+        )
+
+        prompt = self.service._build_prompt(
+            source=self.agent_root / "raw" / "uploads" / "manual" / "report.md",
+            source_content="# Battery\n\nGraphite anode research.",
+        )
+
+        self.assertIn("(no relevant existing Wiki evidence was retrieved)", prompt)
+        self.assertNotIn("Optical telescope.", prompt)
+
+    def test_source_above_small_source_limit_never_calls_llm(self) -> None:
+        source_content = "中" * (SMALL_SOURCE_MAX_TOKENS + 1)
+        upload = UploadFile(filename="large.md", file=io.BytesIO(source_content.encode("utf-8")))
+        job = asyncio.run(self.service.create_job(file=upload))
+        self.service._call_llm_main = lambda prompt, max_tokens=None: (_ for _ in ()).throw(
+            AssertionError("超出直通来源上限时不应调用 LLM")
+        )  # type: ignore[method-assign]
+
+        self.service._run_job(job.job_id)
+
+        self.assertTrue(self.storage.jobs[job.job_id].error.startswith("ingest_source_context_too_large:"))
+        self.assertFalse((self.agent_root / job.source_path).exists())
+
+    def test_source_at_small_source_limit_is_accepted_for_direct_path(self) -> None:
+        self.service._assert_source_is_direct_ingestable("中" * SMALL_SOURCE_MAX_TOKENS)
+
+    def test_token_budget_accepts_boundary_and_rejects_one_token_over(self) -> None:
+        budget = PromptBudget(10, 5, 5, 20)
+
+        self.assertTrue(budget.accepts_input(10))
+        self.assertFalse(budget.accepts_input(11))
+        self.assertEqual(TokenEstimator.estimate("abcd"), 1)
 
     def test_markdown_job_persists_real_stages_in_order(self) -> None:
         upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
@@ -864,30 +941,143 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(self.storage.progress_updates[0], ("converting", 10))
         self.assertEqual(self.storage.jobs[job.job_id].status, "succeeded")
 
-    def test_ingest_classifies_created_and_updated_pages_from_prewrite_state(self) -> None:
+    def test_ingest_applies_selected_entity_patch_without_rewriting_page(self) -> None:
         existing_entity = self.agent_root / "wiki" / "entities" / "Existing.md"
         existing_entity.parent.mkdir(parents=True)
-        existing_entity.write_text("# Old", encoding="utf-8")
+        original = "---\nsources: [old-source]\n---\n# Existing\n\n## Details\n\nOld detail.\n\n## Related\n\n- [[Old]]\n"
+        existing_entity.write_text(original, encoding="utf-8")
         upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
         job = asyncio.run(self.service.create_job(file=upload))
-        llm_payload = (
-            '{"ingest_status":"succeeded","ingest_error":null,"title":"Report","slug":"report","source_page":"# Report",'
-            '"index_entry":"- [Report](sources/report.md) - summary",'
-            '"overview_update":null,'
-            '"entity_pages":[{"path":"entities/Existing.md","content":"# New"}],'
-            '"concept_pages":[],"contradictions":[],"log_entry":"## log"}'
+        data = IngestLLMResult(
+            ingest_status="succeeded",
+            ingest_error=None,
+            title="Report",
+            slug="report",
+            source_page="# Report",
+            index_entry="- [Report](sources/report.md) - summary",
+            log_entry="## log",
+            entity_patches=[
+                {
+                    "path": "entities/Existing.md",
+                    "base_hash": hashlib.sha256(original.encode("utf-8")).hexdigest(),
+                    "operation": "append_section",
+                    "heading": "New evidence",
+                    "content": "Source-grounded detail.",
+                }
+            ],
+            concept_pages=[{"path": "concepts/NewConcept.md", "content": "# New Concept"}],
+            concept_index_entries=[
+                {
+                    "path": "concepts/NewConcept.md",
+                    "entry": "- [New Concept](concepts/NewConcept.md) - source-grounded summary",
+                }
+            ],
         )
-        self.service._call_llm_main = lambda prompt, max_tokens=None: llm_payload  # type: ignore[method-assign]
 
-        self.service._run_job(job.job_id)
-
-        completed = self.storage.jobs[job.job_id]
-        self.assertEqual(
-            completed.created_pages,
-            ["sources/report.md", "index.md", "log.md"],
+        created, updated, _ = self.service._write_ingest_result(
+            job,
+            data,
+            selected_page_hashes={
+                "entities/Existing.md": hashlib.sha256(original.encode("utf-8")).hexdigest()
+            },
         )
-        self.assertEqual(completed.updated_pages, ["entities/Existing.md"])
-        self.assertEqual(existing_entity.read_text(encoding="utf-8"), "# New")
+
+        self.assertEqual(created, ["sources/report.md", "concepts/NewConcept.md", "index.md", "log.md"])
+        self.assertEqual(updated, ["entities/Existing.md"])
+        updated_content = existing_entity.read_text(encoding="utf-8")
+        self.assertIn("sources: [old-source]", updated_content)
+        self.assertIn("## Related", updated_content)
+        self.assertIn("## New evidence", updated_content)
+        self.assertIn("- [New Concept](concepts/NewConcept.md)", (self.agent_root / "wiki" / "index.md").read_text(encoding="utf-8"))
+
+    def test_new_concept_without_index_entry_is_rejected(self) -> None:
+        job = asyncio.run(self.service.create_job(file=UploadFile(filename="report.md", file=io.BytesIO(b"#"))))
+        data = IngestLLMResult(
+            ingest_status="succeeded",
+            ingest_error=None,
+            title="Report",
+            slug="report",
+            source_page="# Report",
+            index_entry="- [Report](sources/report.md)",
+            log_entry="## log",
+            concept_pages=[{"path": "concepts/NewConcept.md", "content": "# New Concept"}],
+        )
+
+        with self.assertRaisesRegex(IngestServiceError, "必须有且仅有一个索引条目"):
+            self.service._write_ingest_result(job, data)
+
+    def test_source_only_ingest_does_not_require_entity_or_concept_index_entries(self) -> None:
+        job = asyncio.run(self.service.create_job(file=UploadFile(filename="report.md", file=io.BytesIO(b"#"))))
+        data = IngestLLMResult(
+            ingest_status="succeeded",
+            ingest_error=None,
+            title="Report",
+            slug="report",
+            source_page="# Report",
+            index_entry="- [Report](sources/report.md)",
+            log_entry="## log",
+        )
+
+        created, updated, changed = self.service._write_ingest_result(job, data)
+
+        self.assertEqual(created, ["sources/report.md", "index.md", "log.md"])
+        self.assertEqual(updated, [])
+        self.assertEqual(changed, ["sources/report.md"])
+
+    def test_existing_page_full_content_is_rejected(self) -> None:
+        existing_concept = self.agent_root / "wiki" / "concepts" / "Existing.md"
+        existing_concept.parent.mkdir(parents=True)
+        existing_concept.write_text("# Old", encoding="utf-8")
+        job = asyncio.run(self.service.create_job(file=UploadFile(filename="report.md", file=io.BytesIO(b"#"))))
+        data = IngestLLMResult(
+            ingest_status="succeeded",
+            ingest_error=None,
+            title="Report",
+            slug="report",
+            source_page="# Report",
+            index_entry="- [Report](sources/report.md)",
+            log_entry="## log",
+            concept_pages=[{"path": "concepts/Existing.md", "content": "# Rewritten"}],
+        )
+
+        with self.assertRaisesRegex(IngestConflictError, "必须使用受控 patch"):
+            self.service._write_ingest_result(job, data)
+
+    def test_patch_rejects_stale_snapshot(self) -> None:
+        existing_concept = self.agent_root / "wiki" / "concepts" / "Existing.md"
+        existing_concept.parent.mkdir(parents=True)
+        original = "# Existing\n\n## Details\n\nOld detail.\n"
+        existing_concept.write_text(original, encoding="utf-8")
+        job = asyncio.run(self.service.create_job(file=UploadFile(filename="report.md", file=io.BytesIO(b"#"))))
+        data = IngestLLMResult(
+            ingest_status="succeeded",
+            ingest_error=None,
+            title="Report",
+            slug="report",
+            source_page="# Report",
+            index_entry="- [Report](sources/report.md)",
+            log_entry="## log",
+            concept_patches=[
+                {
+                    "path": "concepts/Existing.md",
+                    "base_hash": hashlib.sha256(original.encode("utf-8")).hexdigest(),
+                    "operation": "append_section",
+                    "heading": "New evidence",
+                    "content": "Detail.",
+                }
+            ],
+        )
+
+        existing_concept.write_text(original + "\nChanged after retrieval.\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(IngestConflictError, "页面在检索后已变化"):
+            self.service._write_ingest_result(
+                job,
+                data,
+                selected_page_hashes={
+                    "concepts/Existing.md": hashlib.sha256(original.encode("utf-8")).hexdigest()
+                },
+            )
 
     def test_ingest_updates_overview_when_llm_returns_full_content(self) -> None:
         overview_path = self.agent_root / "wiki" / "overview.md"
@@ -1018,7 +1208,7 @@ class IngestServiceTests(unittest.TestCase):
             '"contradictions":[],"log_entry":"## log"}'
         )
         self.service._call_llm_main = lambda prompt, max_tokens=None: llm_payload  # type: ignore[method-assign]
-        self.service._write_ingest_result = lambda job, data: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        self.service._write_ingest_result = lambda job, data, **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
             RuntimeError("write failed")
         )
 

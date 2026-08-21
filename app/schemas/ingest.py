@@ -35,6 +35,23 @@ class IngestGeneratedPage(BaseModel):
     content: str
 
 
+class IngestIndexEntry(BaseModel):
+    """新建 Entity 或 Concept 在对应索引分区中的条目。"""
+
+    path: str
+    entry: str = Field(min_length=1)
+
+
+class IngestPagePatch(BaseModel):
+    """对检索到的既有知识页执行的受控小节修改。"""
+
+    path: str
+    base_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    operation: Literal["append_section", "replace_section"]
+    heading: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1)
+
+
 class IngestLLMResult(BaseModel):
     ingest_status: Literal["succeeded"]
     ingest_error: None
@@ -45,6 +62,10 @@ class IngestLLMResult(BaseModel):
     overview_update: str | None = None
     entity_pages: list[IngestGeneratedPage] = Field(default_factory=list)
     concept_pages: list[IngestGeneratedPage] = Field(default_factory=list)
+    entity_index_entries: list[IngestIndexEntry] = Field(default_factory=list)
+    concept_index_entries: list[IngestIndexEntry] = Field(default_factory=list)
+    entity_patches: list[IngestPagePatch] = Field(default_factory=list)
+    concept_patches: list[IngestPagePatch] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
     log_entry: str
 

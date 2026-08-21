@@ -110,10 +110,22 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(completion_mock.call_args.kwargs["api_base"], "https://api.deepseek.com")
 
     def test_deepseek_ingest_disables_thinking_for_complete_json_output(self) -> None:
-        with patch.object(settings, "ingest_reasoning_effort", None):
+        with patch.object(settings, "ingest_reasoning_effort", None), patch.object(
+            settings, "ingest_llm_max_tokens", 8192
+        ):
             profile = resolve_ingest_model_profile("deepseek/deepseek-v4-flash")
 
         self.assertEqual(profile.llm_profile.reasoning_effort, "none")
+
+    def test_ingest_profiles_have_independent_confirmed_context_budgets(self) -> None:
+        with patch.object(settings, "ingest_reasoning_effort", None):
+            pro = resolve_ingest_model_profile("deepseek/deepseek-v4-pro")
+            flash = resolve_ingest_model_profile("deepseek/deepseek-v4-flash")
+            qwen = resolve_ingest_model_profile("ollama_chat/qwen3.6:35b")
+
+        self.assertEqual((pro.capabilities.max_input_tokens, pro.capabilities.max_output_tokens), (131072, 16384))
+        self.assertEqual((flash.capabilities.max_input_tokens, flash.capabilities.max_output_tokens), (98304, 8192))
+        self.assertEqual((qwen.capabilities.max_input_tokens, qwen.capabilities.max_output_tokens), (49152, 8192))
 
     @patch("app.llm_config.completion")
     def test_deepseek_direct_profile_explicitly_disables_thinking(

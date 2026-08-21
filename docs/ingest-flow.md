@@ -85,7 +85,8 @@ Markdown。PDF 先检查文本层：有文本层时优先 MarkItDown，失败时
 `overview.md` 和最近五个 Source 越大，Prompt 就越大。
 
 Prompt 要求模型返回一个 JSON 对象：成功结果包含 `title`、`slug`、完整
-`source_page`、`index_entry`、可选 `entity_pages`/`concept_pages`、`contradictions` 和
+`source_page`、`index_entry`、可选 `entity_pages`/`concept_pages`、与新页一一对应的
+`entity_index_entries`/`concept_index_entries`、`contradictions` 和
 `log_entry`；无法可靠处理时返回 `ingest_status="failed"` 与 `ingest_error`。
 
 说明文件中曾描述“高层综合有实质变化时可返回 `overview_update`”，但外层 JSON 合约明确要求
@@ -125,22 +126,32 @@ completion 的输出上限，必须容纳 Source、Entity、Concept、索引项�
 
 ## 5. Token 预算和上下文检查
 
-模型调用前会执行 `_assert_prompt_fits_model_context()`：
+模型调用前会在最终 `render_prompt()` 后执行 `_assert_prompt_fits_model_context()`。没有可用的
+厂商 tokenizer 时，它使用保守估算：中日韩等非 ASCII 字符约按 1 字符/1 token，ASCII
+字母数字约按 4 字符/1 token；该值不是精确 tokenizer 结果。
 
-- DeepSeek V4 profile 没有写死本地 context capability，因此只记录
-  `unbounded_provider_managed`，不估算、不截断、不在本地拒绝 Prompt。供应商仍会执行自己的
-  上下文限制；“本地不检查”不等于“输入无限”。
-- Qwen profile 使用保守估算：中日韩等非 ASCII 字符约按 1 字符/1 token，ASCII 字母数字约按
-  4 字符/1 token。要求输入不超过 49,152，且：
+- `deepseek/deepseek-v4-pro`：本地输入上限 131,072、输出上限 16,384、安全余量 16,384。
+- `deepseek/deepseek-v4-flash`：本地输入上限 98,304、输出上限 8,192、安全余量 8,192。
+- `ollama_chat/qwen3.6:35b`：本地输入上限 49,152、输出上限 8,192、安全余量 8,192。
+
+所有档案都要求：
 
   ```text
-  估算输入 + Ingest 输出预算 + 8,192 安全余量 <= 65,536
+  估算输入 <= 档案 max_input_tokens
+  估算输入 + Ingest 输出预算 + 档案 safety_margin_tokens <= context_window_tokens
   ```
 
   不满足时，在调用模型前以 `ingest_source_context_too_large` 失败。
 
-当前没有针对 DeepSeek 的本地 input token 硬预算，也没有在最终 `render_prompt()` 后做
-供应商 tokenizer 的精确复核。
+转换后 Markdown 估算不超过 24,576 tokens 才会进入单次完整来源路径；正文绝不为 Wiki
+上下文而截断。超过该值会在调用 LLM 前以 `ingest_source_context_too_large` 失败。长文
+chunk/reduce 尚未实施。
+
+Wiki 上下文在 `wiki_lock` 内拍摄只读快照，仅检索 `overview.md`、`sources/`、`entities/`
+和 `concepts/` 的命中小节；`index.md` 只保留目录角色，绝不作为完整上下文。检索按来源
+标题、词语和 WikiLink 进行稳定词法排序，最多使用 16,384 tokens，零命中或预算为零会渲染
+显式空证据占位，不会回退到最近页面。每个片段带路径、标题和快照 hash 前缀；日志只记录
+预算与候选元数据，不记录正文。
 
 ## 6. JSON 解析、截断和重试
 
@@ -161,8 +172,16 @@ completion 的输出上限，必须容纳 Source、Entity、Concept、索引项�
 | repair 后仍无效 | 任务失败，保存 retry 响应 |
 | JSON 结构不符合 Pydantic | 任务失败，保存 `*.schema.llm-response.txt` |
 
-JSON repair 会带上原主 Prompt 和无效响应，要求“只修复结构、不增加事实”；它不是独立的
-小 Prompt，因此大文档场景会再次占用较大的上下文。
+JSON repair 只携带紧凑契约和无效响应，要求“只修复 JSON 结构、不增加事实”；它不会重传
+来源正文、Wiki 片段或原主 Prompt。
+
+## 6.1 既有知识页的受控更新
+
+新建 Entity/Concept 仍可由模型提交完整 Markdown，但相同路径已存在时后端拒绝覆盖。既有页只能
+对本次检索快照中出现的路径提交 `entity_patches` 或 `concept_patches`：每个 patch 必须带匹配的
+SHA-256 `base_hash`，并且只能追加一个新的二级小节，或替换一个已存在二级小节的正文。后端拒绝
+过期 hash、未检索路径、重复目标小节和 `Sources`/`Related` 的替换；因此 Frontmatter、既有来源
+清单和关联不会被一次普通 Ingest 静默重写。
 
 当前没有使用供应商 `response_format`、JSON Schema 或 function calling 来约束模型输出；
 约束来自 Prompt、JSON 解析和 Pydantic 后验校验。
@@ -176,7 +195,8 @@ Pydantic 校验成功后，在 `wiki_lock` 内执行写入：
 3. 通过临时文件替换进行原子写入。
 4. Source Frontmatter 由后端纠正：强制 `title/type/tags/date`，manual 只保留 `source_file`，
    scheduled 只保留 `source_url`。
-5. `index_entry` 只插入 `wiki/index.md` 的 `## Sources`。
+5. `index_entry` 插入 `wiki/index.md` 的 `## Sources`；每个新建 Entity/Concept 都必须分别提供
+   对应分区的索引条目，后端将其写入 `## Entities` 或 `## Concepts`。
 6. `log_entry` 写入 `wiki/log.md`；若 `overview_update` 非空则覆盖 `wiki/overview.md`。
 
 写完后，`_validate_ingest()` 仅检查本次知识页：
@@ -185,8 +205,8 @@ Pydantic 校验成功后，在 `wiki_lock` 内执行写入：
 - 页面文件名是否出现在 `index.md` 的全文。
 
 校验结果保存到任务的 `validation.broken_links` 和 `validation.unindexed`，但当前不会因为
-断链或未索引而回滚或标记任务失败。由于只自动插入 Source 的 index entry，模型创建的
-Entity/Concept 页面可能出现 `unindexed`，但任务仍是 `succeeded`。
+断链而回滚或标记任务失败。新建 Entity/Concept 在写入前缺少对应索引条目会直接失败；
+`unindexed` 仍作为历史数据和异常写入的兜底信号。
 
 ## 8. 成功、失败和发布
 

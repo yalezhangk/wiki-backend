@@ -61,6 +61,20 @@ class StartupDependencyTests(unittest.TestCase):
 
         self.assertEqual(settings.ingest_max_upload_bytes, 10 * 1024 * 1024)
 
+    def test_quality_report_stale_after_days_defaults_to_ninety(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            default_settings = Settings(_env_file=None)
+        with patch.dict(
+            "os.environ",
+            {"WIKI_BACKEND_QUALITY_STALE_AFTER_DAYS": "30"},
+            clear=True,
+        ):
+            configured_settings = Settings(_env_file=None)
+
+        self.assertEqual(default_settings.quality_stale_after_days, 90)
+        self.assertEqual(configured_settings.quality_stale_after_days, 30)
+        self.assertEqual(configured_settings.quality_stale_after_hours, 30 * 24)
+
     def test_ingest_llm_token_limit_uses_environment_value(self) -> None:
         with patch.dict(
             "os.environ",

@@ -112,11 +112,15 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias="WIKI_BACKEND_PUBLISH_MAX_DELAY_SECONDS",
     )
-    quality_stale_after_hours: int = Field(
-        default=168,
+    quality_stale_after_days: int = Field(
+        default=90,
         gt=0,
-        validation_alias="WIKI_BACKEND_QUALITY_STALE_AFTER_HOURS",
+        validation_alias="WIKI_BACKEND_QUALITY_STALE_AFTER_DAYS",
     )
+
+    @property
+    def quality_stale_after_hours(self) -> int:
+        return self.quality_stale_after_days * 24
     llm_provider: str = Field(
         default="deepseek",
         validation_alias="WIKI_BACKEND_LLM_PROVIDER",

@@ -75,14 +75,20 @@ Markdown。PDF 先检查文本层：有文本层时优先 MarkItDown，失败时
 `app/prompts/ingest_instructions.md`。它以单条 `user` message 发送给模型，组成顺序为：
 
 1. 固定 Ingest 角色和 JSON 输出合约。
-2. 完整 `wiki/index.md`。
-3. 完整 `wiki/overview.md`。
-4. 按修改时间倒序的最近五篇 `wiki/sources/*.md` 全文。
-5. 本次上传文档的完整 Markdown。
-6. 当天日期。
+2. 从当前 Wiki 快照中按来源内容检索出的受限证据片段。
+3. 本次上传文档的完整 Markdown。
+4. 当天日期。
 
-因此当前实现不是按相关性检索 Wiki，也不做来源文档的 chunk/reduce；`index.md`、
-`overview.md` 和最近五个 Source 越大，Prompt 就越大。
+构造上下文时，后端在 `wiki_lock` 内拍摄 `index.md`、`overview.md` 以及
+`sources/`、`entities/`、`concepts/` 下 Markdown 页的只读快照。`index.md` 只用于
+快照完整性，不参与候选或 Prompt 上下文。其余页面按标题和正文与来源中的词法词语、
+WikiLink 进行评分；候选按评分、路径和标题稳定排序。选择时优先为 Overview 及每种
+其他页面类型各保留一次机会，再在预算内补齐其余候选。单个片段最大 4,096 tokens，
+Wiki 上下文最多 16,384 tokens，并会结合模型可用输入空间及最终 Prompt 预算移除低分片段。
+没有命中或没有可用预算时，Prompt 会包含明确的空证据占位。
+
+因此当前实现会按相关性检索受限 Wiki 小节，但不会对来源文档做 chunk/reduce；来源正文始终
+完整进入单次 Prompt，并受单次来源与最终模型上下文预算限制。
 
 Prompt 要求模型返回一个 JSON 对象：成功结果包含 `title`、`slug`、完整
 `source_page`、`index_entry`、可选 `entity_pages`/`concept_pages`、与新页一一对应的
@@ -147,11 +153,13 @@ completion 的输出上限，必须容纳 Source、Entity、Concept、索引项�
 上下文而截断。超过该值会在调用 LLM 前以 `ingest_source_context_too_large` 失败。长文
 chunk/reduce 尚未实施。
 
-Wiki 上下文在 `wiki_lock` 内拍摄只读快照，仅检索 `overview.md`、`sources/`、`entities/`
-和 `concepts/` 的命中小节；`index.md` 只保留目录角色，绝不作为完整上下文。检索按来源
-标题、词语和 WikiLink 进行稳定词法排序，最多使用 16,384 tokens，零命中或预算为零会渲染
-显式空证据占位，不会回退到最近页面。每个片段带路径、标题和快照 hash 前缀；日志只记录
-预算与候选元数据，不记录正文。
+Wiki 上下文在 `wiki_lock` 内拍摄只读快照；`index.md` 不参与候选或 Prompt 上下文，
+`overview.md`、`sources/`、`entities/` 和 `concepts/` 的小节才会参与检索。检索按来源中的
+词语和 WikiLink 与小节标题、正文的匹配评分，再以评分、路径和标题稳定排序；选择时优先
+覆盖 Overview 及每种其他页面类型。单个小节超过 4,096 tokens 会跳过，选中上下文最多使用
+16,384 tokens，还会受模型剩余输入空间和最终 Prompt 预算约束。零命中或预算为零会渲染显式
+空证据占位，不会回退到最近页面。每个片段带路径、标题和快照 hash 前缀；日志只记录预算与
+候选元数据，不记录正文。
 
 ## 6. JSON 解析、截断和重试
 
@@ -228,8 +236,8 @@ Ingest 的 `succeeded` 解释为站点已更新。
 ## 当前实现的边界
 
 - 单次完整 Prompt、单次主生成；没有长文分块、分阶段抽取、reduce 或事实草稿。
-- Wiki 上下文采用固定“完整 index + 完整 overview + 最近五 Source”，不是相关性检索。
-- DeepSeek 没有本地输入 token 硬上限；输出只有单次 completion 上限。
+- Wiki 上下文使用基于来源词语和 WikiLink 的词法小节检索，不使用向量检索或长文 chunk/reduce。
+- 所有 Ingest 模型档案都在调用前检查输入、输出和安全余量预算；这不是供应商 tokenizer 的精确计数。
 - JSON 依靠 Prompt 和后验解析/Pydantic；没有供应商级 JSON Schema 约束。
 - 链接和索引校验是报告型，不是阻断型质量门。
 - 队列为当前进程内存队列，不能替代持久化、可恢复的任务调度。

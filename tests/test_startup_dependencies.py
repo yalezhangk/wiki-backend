@@ -133,7 +133,7 @@ class StartupDependencyTests(unittest.TestCase):
             "os.environ",
             {
                 "WIKI_BACKEND_MODEL_PROFILE_DEFAULT_ID": "deepseek-v4-flash",
-                "WIKI_BACKEND_MODEL_PROFILE_ENABLED_IDS": "deepseek-v4-flash,local-qwen3.6-35b-direct",
+                "WIKI_BACKEND_MODEL_PROFILE_ENABLED_IDS": "deepseek-v4-flash,local-qwen3.8-27b-direct",
             },
             clear=True,
         ):
@@ -141,7 +141,7 @@ class StartupDependencyTests(unittest.TestCase):
 
         self.assertEqual(
             settings.model_profile_enabled_ids,
-            ("deepseek-v4-flash", "local-qwen3.6-35b-direct"),
+            ("deepseek-v4-flash", "local-qwen3.8-27b-direct"),
         )
 
     def test_services_do_not_require_agent_source_code_during_construction(self) -> None:

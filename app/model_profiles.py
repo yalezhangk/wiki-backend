@@ -16,8 +16,8 @@ LOGGER = logging.getLogger(__name__)
 MODEL_PROFILE_AVAILABILITY_CACHE_SECONDS = 60
 DEEPSEEK_MAX_TOKENS = 8192
 DEEPSEEK_TEMPERATURE = 0.2
-LOCAL_QWEN_DIRECT_MAX_TOKENS = 1024
-LOCAL_QWEN_THINKING_MAX_TOKENS = 2048
+LOCAL_QWEN_DIRECT_MAX_TOKENS = 1536
+LOCAL_QWEN_THINKING_MAX_TOKENS = 4096
 LOCAL_QWEN_TEMPERATURE = 0.2
 
 
@@ -169,15 +169,15 @@ class ModelProfileService:
                     temperature=DEEPSEEK_TEMPERATURE,
                 ),
             ),
-            "local-qwen3.6-35b-direct": AnswerModelProfile(
-                id="local-qwen3.6-35b-direct",
-                label="Qwen3.6 35B · 直接回答",
+            "local-qwen3.8-27b-direct": AnswerModelProfile(
+                id="local-qwen3.8-27b-direct",
+                label="Qwen3.8 27B · 直接回答",
                 location="local",
                 reasoning_mode="direct",
-                enabled="local-qwen3.6-35b-direct" in settings.model_profile_enabled_ids,
+                enabled="local-qwen3.8-27b-direct" in settings.model_profile_enabled_ids,
                 llm_profile=LLMProfile(
                     provider="ollama_chat",
-                    model="qwen3.6:35b",
+                    model="qwen3.8:27b",
                     api_key=None,
                     api_base=settings.ollama_api_base
                     or settings.legacy_llm_api_base
@@ -187,15 +187,15 @@ class ModelProfileService:
                     reasoning_effort="none",
                 ),
             ),
-            "local-qwen3.6-35b-thinking": AnswerModelProfile(
-                id="local-qwen3.6-35b-thinking",
-                label="Qwen3.6 35B · 深度思考",
+            "local-qwen3.8-27b-thinking": AnswerModelProfile(
+                id="local-qwen3.8-27b-thinking",
+                label="Qwen3.8 27B · 深度思考",
                 location="local",
                 reasoning_mode="thinking",
-                enabled="local-qwen3.6-35b-thinking" in settings.model_profile_enabled_ids,
+                enabled="local-qwen3.8-27b-thinking" in settings.model_profile_enabled_ids,
                 llm_profile=LLMProfile(
                     provider="ollama_chat",
-                    model="qwen3.6:35b",
+                    model="qwen3.8:27b",
                     api_key=None,
                     api_base=settings.ollama_api_base
                     or settings.legacy_llm_api_base

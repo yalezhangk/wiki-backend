@@ -109,7 +109,7 @@ WIKI_BACKEND_DEEPSEEK_API_KEY=
 WIKI_BACKEND_DEEPSEEK_API_BASE=https://api.deepseek.com
 WIKI_BACKEND_OLLAMA_API_BASE=http://127.0.0.1:11434
 WIKI_BACKEND_MODEL_PROFILE_DEFAULT_ID=deepseek-v4-flash
-WIKI_BACKEND_MODEL_PROFILE_ENABLED_IDS=deepseek-v4-pro,deepseek-v4-flash,local-qwen3.6-35b-direct,local-qwen3.6-35b-thinking
+WIKI_BACKEND_MODEL_PROFILE_ENABLED_IDS=deepseek-v4-pro,deepseek-v4-flash,local-qwen3.8-27b-direct,local-qwen3.8-27b-thinking
 ```
 
 `WIKI_AGENT_REPO_PATH` 只表示共享知识库数据所在的 agent 仓库根目录，不允许再用于 `sys.path` 或动态 Python 导入。

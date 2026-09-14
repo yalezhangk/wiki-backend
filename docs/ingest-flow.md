@@ -106,7 +106,7 @@ Ingest 只接受服务端白名单模型：
 | --- | --- | --- |
 | `deepseek/deepseek-v4-flash` | 强制关闭 | 不做本地硬限制 |
 | `deepseek/deepseek-v4-pro` | 强制关闭 | 不做本地硬限制 |
-| `ollama_chat/qwen3.6:35b` | 强制关闭 | 做 65,536 token 预算检查 |
+| `ollama_chat/qwen3.8:27b` | 强制关闭 | 做 65,536 token 预算检查 |
 
 DeepSeek V4 的 Ingest profile 固定为 `reasoning_effort="none"`，并通过
 `extra_body={"thinking": {"type": "disabled"}}` 显式关闭供应商默认思考。原因是
@@ -138,7 +138,7 @@ completion 的输出上限，必须容纳 Source、Entity、Concept、索引项�
 
 - `deepseek/deepseek-v4-pro`：本地输入上限 131,072、输出上限 16,384、安全余量 16,384。
 - `deepseek/deepseek-v4-flash`：本地输入上限 98,304、输出上限 8,192、安全余量 8,192。
-- `ollama_chat/qwen3.6:35b`：本地输入上限 49,152、输出上限 8,192、安全余量 8,192。
+- `ollama_chat/qwen3.8:27b`：本地输入上限 49,152、输出上限 8,192、安全余量 8,192。
 
 所有档案都要求：
 
@@ -148,6 +148,10 @@ completion 的输出上限，必须容纳 Source、Entity、Concept、索引项�
   ```
 
   不满足时，在调用模型前以 `ingest_source_context_too_large` 失败。
+
+Ollama 服务必须实际分配至少 65,536 token 上下文，例如通过服务环境变量
+`OLLAMA_CONTEXT_LENGTH=65536` 配置；模型声明的 262,144 token 原生窗口不等于
+Ollama 当前运行时的上下文分配。
 
 转换后 Markdown 估算不超过 24,576 tokens 才会进入单次完整来源路径；正文绝不为 Wiki
 上下文而截断。超过该值会在调用 LLM 前以 `ingest_source_context_too_large` 失败。长文

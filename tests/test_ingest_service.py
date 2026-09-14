@@ -595,7 +595,7 @@ class IngestServiceTests(unittest.TestCase):
 
     def test_qwen_ingest_prompt_over_context_fails_before_llm_call(self) -> None:
         with patch("app.services.ingest_service.settings.ingest_provider", "ollama_chat"), patch(
-            "app.services.ingest_service.settings.ingest_model", "qwen3.6:35b"
+            "app.services.ingest_service.settings.ingest_model", "qwen3.8:27b"
         ), patch("app.services.ingest_service.settings.ingest_reasoning_effort", "none"):
             profile = self.service._resolve_ingest_profile()
             self.service._call_llm_main = lambda prompt, max_tokens=None: (_ for _ in ()).throw(
@@ -609,14 +609,14 @@ class IngestServiceTests(unittest.TestCase):
 
     def test_qwen_ingest_profile_records_model_and_uses_direct_reasoning(self) -> None:
         with patch("app.services.ingest_service.settings.ingest_provider", "ollama_chat"), patch(
-            "app.services.ingest_service.settings.ingest_model", "qwen3.6:35b"
+            "app.services.ingest_service.settings.ingest_model", "qwen3.8:27b"
         ), patch("app.services.ingest_service.settings.ingest_reasoning_effort", "none"):
             job = asyncio.run(
                 self.service.create_job(file=UploadFile(filename="local.md", file=io.BytesIO(b"# Local")))
             )
             profile = self.service._resolve_ingest_profile(job.ingest_model)
 
-        self.assertEqual(job.ingest_model, "ollama_chat/qwen3.6:35b")
+        self.assertEqual(job.ingest_model, "ollama_chat/qwen3.8:27b")
         self.assertEqual(profile.llm_profile.reasoning_effort, "none")
 
     def test_ingest_uses_resolved_profile_for_litellm_call(self) -> None:

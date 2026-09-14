@@ -109,7 +109,7 @@ def resolve_ingest_model_profile(model_identifier: str | None = None) -> IngestM
     profiles = {
         "deepseek/deepseek-v4-pro": IngestModelCapabilities(131072, 16384, 1000000, 16384),
         "deepseek/deepseek-v4-flash": IngestModelCapabilities(98304, 8192, 1000000, 8192),
-        "ollama_chat/qwen3.6:35b": IngestModelCapabilities(
+        "ollama_chat/qwen3.8:27b": IngestModelCapabilities(
             max_input_tokens=49152,
             max_output_tokens=8192,
             context_window_tokens=65536,
@@ -127,9 +127,9 @@ def resolve_ingest_model_profile(model_identifier: str | None = None) -> IngestM
         # default thinking can consume the full completion budget before it
         # emits any final content, so this workflow must stay direct.
         reasoning_effort = "none"
-    if configured_identifier == "ollama_chat/qwen3.6:35b":
+    if configured_identifier == "ollama_chat/qwen3.8:27b":
         if reasoning_effort not in {None, "", "none"}:
-            raise LLMConfigError("qwen3.6:35b ingest requires reasoning_effort=none")
+            raise LLMConfigError("qwen3.8:27b ingest requires reasoning_effort=none")
         reasoning_effort = "none"
     if settings.ingest_llm_max_tokens > capabilities.max_output_tokens:
         raise LLMConfigError("ingest output budget exceeds the model maximum output")

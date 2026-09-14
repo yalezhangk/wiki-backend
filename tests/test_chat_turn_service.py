@@ -185,12 +185,12 @@ class ChatTurnServiceTests(unittest.TestCase):
         question = "不应写入日志的私密问题"
 
         with self.assertLogs("app.services.chat_turn_service", level="INFO") as captured:
-            self.service.run_turn(1, question, "local-qwen3.6-35b-direct")
+            self.service.run_turn(1, question, "local-qwen3.8-27b-direct")
 
         records = "\n".join(captured.output)
         self.assertIn("Chat turn started chat_id=1", records)
-        self.assertIn("model_profile_id=local-qwen3.6-35b-direct", records)
-        self.assertIn("model=qwen3.6:35b", records)
+        self.assertIn("model_profile_id=local-qwen3.8-27b-direct", records)
+        self.assertIn("model=qwen3.8:27b", records)
         self.assertIn("reasoning_mode=direct", records)
         self.assertIn("reasoning_effort=none", records)
         self.assertIn("Chat user message persisted chat_id=1 user_message_id=1", records)

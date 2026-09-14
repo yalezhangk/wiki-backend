@@ -183,8 +183,8 @@ class Settings(BaseSettings):
         default=(
             "deepseek-v4-pro",
             "deepseek-v4-flash",
-            "local-qwen3.6-35b-direct",
-            "local-qwen3.6-35b-thinking",
+            "local-qwen3.8-27b-direct",
+            "local-qwen3.8-27b-thinking",
         ),
         validation_alias="WIKI_BACKEND_MODEL_PROFILE_ENABLED_IDS",
     )

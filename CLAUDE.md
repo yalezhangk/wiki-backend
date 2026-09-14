@@ -58,7 +58,7 @@ Ingest/synthesis **业务成功 ≠ Quartz 发布成功**：成功后只是把�
 ### 两条 LLM 路径（勿混淆）
 
 1. **内部任务**（检索、入库、巡检）：`app/llm_config.py` 通过 LiteLLM `completion()` 调用，用 `WIKI_BACKEND_LLM_PROVIDER` + `FAST/MAIN_MODEL`（`call_llm_fast` / `call_llm_main`）。
-2. **聊天回答模型档案**：`app/model_profiles.py` 的 `ModelProfileService` 维护服务端白名单档案（deepseek-v4-* 云端 + local-qwen3.6-* 同机 Ollama），模型名/token/温度/推理策略由服务端固定，前端只能选已启用档案 ID（`WIKI_BACKEND_MODEL_PROFILE_ENABLED_IDS`）。聊天走 `call_llm_profile`，不走内部 fast/main。
+2. **聊天回答模型档案**：`app/model_profiles.py` 的 `ModelProfileService` 维护服务端白名单档案（deepseek-v4-* 云端 + local-qwen3.8-* 同机 Ollama），模型名/token/温度/推理策略由服务端固定，前端只能选已启用档案 ID（`WIKI_BACKEND_MODEL_PROFILE_ENABLED_IDS`）。聊天走 `call_llm_profile`，不走内部 fast/main。
 
 ### Wiki 数据边界
 

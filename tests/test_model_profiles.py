@@ -23,7 +23,7 @@ class ModelProfileApiTests(unittest.TestCase):
     def test_list_returns_only_public_profile_data(self) -> None:
         with patch(
             "app.model_profiles.settings.model_profile_enabled_ids",
-            ("deepseek-v4-flash", "local-qwen3.6-35b-direct"),
+            ("deepseek-v4-flash", "local-qwen3.8-27b-direct"),
         ):
             service = ModelProfileService(availability_checker=lambda profile: True)
             client = TestClient(create_app(model_profile_service=service, initialize_storage=False))
@@ -84,13 +84,13 @@ class ModelProfileServiceTests(unittest.TestCase):
     def test_local_profiles_use_litellm_reasoning_effort_mapping(self) -> None:
         service = ModelProfileService(availability_checker=lambda profile: True)
 
-        direct = service.resolve_for_turn("local-qwen3.6-35b-direct")
-        thinking = service.resolve_for_turn("local-qwen3.6-35b-thinking")
+        direct = service.resolve_for_turn("local-qwen3.8-27b-direct")
+        thinking = service.resolve_for_turn("local-qwen3.8-27b-thinking")
 
         self.assertEqual(direct.llm_profile.reasoning_effort, "none")
         self.assertEqual(thinking.llm_profile.reasoning_effort, "low")
-        self.assertEqual(direct.llm_profile.max_tokens, 1024)
-        self.assertEqual(thinking.llm_profile.max_tokens, 2048)
+        self.assertEqual(direct.llm_profile.max_tokens, 1536)
+        self.assertEqual(thinking.llm_profile.max_tokens, 4096)
 
 
 if __name__ == "__main__":

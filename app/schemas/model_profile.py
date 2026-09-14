@@ -7,8 +7,8 @@ from pydantic import BaseModel, Field
 ModelProfileId = Literal[
     "deepseek-v4-pro",
     "deepseek-v4-flash",
-    "local-qwen3.6-35b-direct",
-    "local-qwen3.6-35b-thinking",
+    "local-qwen3.8-27b-direct",
+    "local-qwen3.8-27b-thinking",
 ]
 
 

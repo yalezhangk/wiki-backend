@@ -3,7 +3,7 @@
 ## 目标
 
 为 Ingest 提供独立于全局 `WIKI_BACKEND_LLM_*` 的服务端模型选择，确保本地
-`ollama_chat/qwen3.6:35b` 使用已确认的 65536 token 上下文限制。云端 DeepSeek
+`ollama_chat/qwen3.8:27b` 使用已确认的 65536 token 上下文限制。云端 DeepSeek
 模型在其窗口能力未被确认前，不强行配置或假定本地上下文限制。
 
 本计划只涉及模型选择、Qwen prompt 硬检查、任务模型记录和相应文档/测试；不改变
@@ -26,7 +26,7 @@ Ingest 不能可靠地按模型能力约束最终 prompt。
 1. `.env` 只选择 Ingest 模型，不为每个模型增加四个 token 配置项。
 2. 模型名称、provider、推理方式和已知能力由服务端白名单控制；API 客户端不得传入
    provider、model、API 地址或 token 预算。
-3. 已确认的 `ollama_chat/qwen3.6:35b` 使用固定包络：
+3. 已确认的 `ollama_chat/qwen3.8:27b` 使用固定包络：
 
    ```text
    context_window = 65536
@@ -40,7 +40,7 @@ Ingest 不能可靠地按模型能力约束最终 prompt。
    `unbounded_provider_managed` 模式：不做本地上下文窗口预检，不虚构窗口或安全余量；
    仍使用配置的 `max_tokens` 限制输出，并由云端 API 执行最终窗口处理。
 5. `ingest_jobs` 只记录实际执行的规范化模型标识，例如
-   `deepseek/deepseek-v4-pro` 或 `ollama_chat/qwen3.6:35b`；不持久化 token 预算。
+   `deepseek/deepseek-v4-pro` 或 `ollama_chat/qwen3.8:27b`；不持久化 token 预算。
 6. 本次不实现 Wiki 上下文缩减、候选检索调整、长文档分块或摘要归并。Qwen 的最终
    prompt 超窗时必须失败，不调用模型、不写 Wiki。
 
@@ -62,7 +62,7 @@ WIKI_BACKEND_INGEST_REASONING_EFFORT=
 
 ```env
 WIKI_BACKEND_INGEST_PROVIDER=ollama_chat
-WIKI_BACKEND_INGEST_MODEL=qwen3.6:35b
+WIKI_BACKEND_INGEST_MODEL=qwen3.8:27b
 WIKI_BACKEND_INGEST_LLM_MAX_TOKENS=8192
 WIKI_BACKEND_INGEST_REASONING_EFFORT=none
 ```
@@ -76,7 +76,7 @@ WIKI_BACKEND_INGEST_REASONING_EFFORT=none
    `WIKI_BACKEND_INGEST_LLM_MAX_TOKENS` 作为 Ingest 输出上限。
 2. 在 LLM 配置层新增服务端受控的 Ingest 模型解析与能力注册表：
    - 白名单至少包含 `deepseek/deepseek-v4-pro`、`deepseek/deepseek-v4-flash` 和
-     `ollama_chat/qwen3.6:35b`。
+     `ollama_chat/qwen3.8:27b`。
    - Qwen 返回固定的 65536 包络。
    - DeepSeek 返回无本地窗口限制的能力标记。
    - 不复用浏览器 Chat 的 `model_profile_id` 作为 Ingest 输入。
@@ -96,7 +96,7 @@ WIKI_BACKEND_INGEST_REASONING_EFFORT=none
 
 ## 验证标准
 
-- Qwen 配置下，服务端调用 `ollama_chat/qwen3.6:35b` 且传入 `max_tokens=8192`。
+- Qwen 配置下，服务端调用 `ollama_chat/qwen3.8:27b` 且传入 `max_tokens=8192`。
 - Qwen 的最终 prompt 在包络内时允许调用；超窗时任务失败且不发生 LLM/Wiki 写入。
 - DeepSeek Pro 与 Flash 可在未知窗口模式下调用，且不被 Qwen 的 65536 限制误拦截。
 - 非白名单 provider/model 在服务启动或任务创建时明确失败。

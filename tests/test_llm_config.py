@@ -22,7 +22,7 @@ from app.llm_config import (
 class LLMConfigTests(unittest.TestCase):
     def test_resolve_model_adds_provider_prefix(self) -> None:
         self.assertEqual(_resolve_model("deepseek", "deepseek-chat"), "deepseek/deepseek-chat")
-        self.assertEqual(_resolve_model("ollama_chat", "qwen3.6:35b"), "ollama_chat/qwen3.6:35b")
+        self.assertEqual(_resolve_model("ollama_chat", "qwen3.8:27b"), "ollama_chat/qwen3.8:27b")
 
     @patch("app.llm_config.completion")
     def test_ollama_chat_uses_shared_endpoint_without_api_key(self, completion_mock: Mock) -> None:
@@ -32,7 +32,7 @@ class LLMConfigTests(unittest.TestCase):
 
         with (
             patch.object(settings, "llm_provider", "ollama_chat"),
-            patch.object(settings, "llm_fast_model", "qwen3.6:35b"),
+            patch.object(settings, "llm_fast_model", "qwen3.8:27b"),
             patch.object(settings, "legacy_llm_api_key", "remote-provider-key"),
             patch.object(settings, "ollama_api_base", "http://127.0.0.1:11434"),
         ):
@@ -40,7 +40,7 @@ class LLMConfigTests(unittest.TestCase):
 
         self.assertEqual(result, "answer")
         kwargs = completion_mock.call_args.kwargs
-        self.assertEqual(kwargs["model"], "ollama_chat/qwen3.6:35b")
+        self.assertEqual(kwargs["model"], "ollama_chat/qwen3.8:27b")
         self.assertEqual(kwargs["api_base"], "http://127.0.0.1:11434")
         self.assertNotIn("api_key", kwargs)
 
@@ -52,7 +52,7 @@ class LLMConfigTests(unittest.TestCase):
         prompt = "this prompt must not be logged"
         profile = LLMProfile(
             provider="ollama_chat",
-            model="qwen3.6:35b",
+            model="qwen3.8:27b",
             api_key=None,
             api_base="http://127.0.0.1:11434",
             max_tokens=512,
@@ -65,7 +65,7 @@ class LLMConfigTests(unittest.TestCase):
 
         records = "\n".join(captured.output)
         self.assertEqual(result, "answer")
-        self.assertIn("LLM completion started provider=ollama_chat model=qwen3.6:35b", records)
+        self.assertIn("LLM completion started provider=ollama_chat model=qwen3.8:27b", records)
         self.assertIn("reasoning_effort=none", records)
         self.assertIn("LLM completion completed", records)
         self.assertNotIn(prompt, records)
@@ -121,7 +121,7 @@ class LLMConfigTests(unittest.TestCase):
         with patch.object(settings, "ingest_reasoning_effort", None):
             pro = resolve_ingest_model_profile("deepseek/deepseek-v4-pro")
             flash = resolve_ingest_model_profile("deepseek/deepseek-v4-flash")
-            qwen = resolve_ingest_model_profile("ollama_chat/qwen3.6:35b")
+            qwen = resolve_ingest_model_profile("ollama_chat/qwen3.8:27b")
 
         self.assertEqual((pro.capabilities.max_input_tokens, pro.capabilities.max_output_tokens), (131072, 16384))
         self.assertEqual((flash.capabilities.max_input_tokens, flash.capabilities.max_output_tokens), (98304, 8192))
@@ -186,7 +186,7 @@ class LLMConfigTests(unittest.TestCase):
                 content_length = int(self.headers["Content-Length"])
                 requests.append({"path": self.path, "body": json.loads(self.rfile.read(content_length))})
                 response = {
-                    "model": "qwen3.6:35b",
+                    "model": "qwen3.8:27b",
                     "created_at": "2026-08-04T00:00:00Z",
                     "message": {
                         "role": "assistant",
@@ -215,7 +215,7 @@ class LLMConfigTests(unittest.TestCase):
                 "answer directly",
                 LLMProfile(
                     provider="ollama_chat",
-                    model="qwen3.6:35b",
+                    model="qwen3.8:27b",
                     api_key=None,
                     api_base=api_base,
                     max_tokens=512,
@@ -227,7 +227,7 @@ class LLMConfigTests(unittest.TestCase):
                 "answer after thinking",
                 LLMProfile(
                     provider="ollama_chat",
-                    model="qwen3.6:35b",
+                    model="qwen3.8:27b",
                     api_key=None,
                     api_base=api_base,
                     max_tokens=512,

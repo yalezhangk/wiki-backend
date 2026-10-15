@@ -21,7 +21,10 @@ def get_model_profile_service(request: Request) -> ModelProfileService:
     "",
     response_model=list[ModelProfileResponse],
     summary="获取可用回答模型档案",
-    description="只返回浏览器可见的档案 ID、显示名称、执行位置、推理策略和缓存的可用状态。",
+    description=(
+        "只返回浏览器可见的档案 ID、显示名称、执行位置、推理策略和可用状态；"
+        "可用性缓存过期时会重新探测。"
+    ),
 )
 def list_model_profiles(
     model_profile_service: ModelProfileService = Depends(get_model_profile_service),

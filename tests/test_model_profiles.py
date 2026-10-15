@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Lock
+from time import sleep
 import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.model_profiles import ModelProfileService
+from app.model_profiles import AnswerModelProfile, ModelProfileService
 
 
 class ModelProfileApiTests(unittest.TestCase):
@@ -91,6 +94,74 @@ class ModelProfileServiceTests(unittest.TestCase):
         self.assertEqual(thinking.llm_profile.reasoning_effort, "low")
         self.assertEqual(direct.llm_profile.max_tokens, 1536)
         self.assertEqual(thinking.llm_profile.max_tokens, 4096)
+
+    def test_list_refreshes_stale_shared_local_model_availability(self) -> None:
+        current_time = [0.0]
+        available = [False]
+        checked_profile_ids: list[str] = []
+
+        def check_availability(profile: AnswerModelProfile) -> bool:
+            checked_profile_ids.append(profile.id)
+            return available[0]
+
+        with patch(
+            "app.model_profiles.settings.model_profile_enabled_ids",
+            ("local-qwen3.8-27b-direct", "local-qwen3.8-27b-thinking"),
+        ):
+            service = ModelProfileService(
+                availability_checker=check_availability,
+                now=lambda: current_time[0],
+            )
+
+        service.refresh_availability()
+        self.assertEqual(len(checked_profile_ids), 1)
+        self.assertTrue(all(not profile.available for profile in service.list_profiles()))
+
+        available[0] = True
+        current_time[0] = 60.0
+        self.assertTrue(all(profile.available for profile in service.list_profiles()))
+        self.assertEqual(len(checked_profile_ids), 2)
+
+        available[0] = False
+        current_time[0] = 120.0
+        self.assertTrue(all(not profile.available for profile in service.list_profiles()))
+        self.assertEqual(len(checked_profile_ids), 3)
+
+    def test_concurrent_stale_lists_share_one_health_check(self) -> None:
+        current_time = [0.0]
+        check_count = 0
+        check_count_lock = Lock()
+
+        def check_availability(profile: AnswerModelProfile) -> bool:
+            nonlocal check_count
+            with check_count_lock:
+                check_count += 1
+            sleep(0.05)
+            return True
+
+        with patch(
+            "app.model_profiles.settings.model_profile_enabled_ids",
+            ("local-qwen3.8-27b-direct", "local-qwen3.8-27b-thinking"),
+        ):
+            service = ModelProfileService(
+                availability_checker=check_availability,
+                now=lambda: current_time[0],
+            )
+
+        service.refresh_availability()
+        current_time[0] = 60.0
+        barrier = Barrier(8)
+
+        def list_profiles() -> None:
+            barrier.wait()
+            service.list_profiles()
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(list_profiles) for _ in range(8)]
+            for future in futures:
+                future.result()
+
+        self.assertEqual(check_count, 2)
 
 
 if __name__ == "__main__":

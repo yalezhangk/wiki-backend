@@ -7,7 +7,7 @@ import re
 import shutil
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
@@ -218,7 +218,7 @@ class ScheduledIngestService:
                 markdown_count=directory_counts[source_path.parent],
             )
             if source_error is not None:
-                summary = self._replace_summary(summary, failed_count=summary.failed_count + 1)
+                summary = replace(summary, failed_count=summary.failed_count + 1)
                 LOGGER.error(
                     "Scheduled ingest skipped relative_path=%s reason=%s",
                     relative_path,
@@ -232,7 +232,7 @@ class ScheduledIngestService:
                     temporary_directory=Path(temporary_directory),
                 )
                 if snapshot is None:
-                    summary = self._replace_summary(summary, deferred_count=summary.deferred_count + 1)
+                    summary = replace(summary, deferred_count=summary.deferred_count + 1)
                     LOGGER.info(
                         "Scheduled ingest deferred relative_path=%s reason=source_changed_or_empty",
                         relative_path,
@@ -247,14 +247,14 @@ class ScheduledIngestService:
                     now=self._now(),
                 )
                 if record is None:
-                    summary = self._replace_summary(summary, skipped_count=summary.skipped_count + 1)
+                    summary = replace(summary, skipped_count=summary.skipped_count + 1)
                     LOGGER.info(
                         "Scheduled ingest skipped relative_path=%s reason=already_recorded",
                         relative_path,
                     )
                     continue
 
-                summary = self._replace_summary(summary, candidate_count=summary.candidate_count + 1)
+                summary = replace(summary, candidate_count=summary.candidate_count + 1)
                 LOGGER.info("Scheduled ingest processing relative_path=%s", relative_path)
                 outcome = self._ingest_source(
                     record=record,
@@ -263,11 +263,11 @@ class ScheduledIngestService:
                     source_url=source_url,
                 )
                 if outcome == "succeeded":
-                    summary = self._replace_summary(summary, succeeded_count=summary.succeeded_count + 1)
+                    summary = replace(summary, succeeded_count=summary.succeeded_count + 1)
                 elif outcome == "duplicate":
-                    summary = self._replace_summary(summary, skipped_count=summary.skipped_count + 1)
+                    summary = replace(summary, skipped_count=summary.skipped_count + 1)
                 else:
-                    summary = self._replace_summary(summary, failed_count=summary.failed_count + 1)
+                    summary = replace(summary, failed_count=summary.failed_count + 1)
 
         LOGGER.info(
             "Scheduled Markdown ingest finished scanned=%s candidates=%s succeeded=%s failed=%s deferred=%s skipped=%s",
@@ -448,8 +448,3 @@ class ScheduledIngestService:
             source_device=after.st_dev,
             source_inode=after.st_ino,
         )
-
-    @staticmethod
-    def _replace_summary(summary: ScheduledIngestSummary, **updates: int) -> ScheduledIngestSummary:
-        values = summary.__dict__ | updates
-        return ScheduledIngestSummary(**values)

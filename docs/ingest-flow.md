@@ -79,9 +79,8 @@ Markdown。PDF 先检查文本层：有文本层时优先 MarkItDown，失败时
 3. 本次上传文档的完整 Markdown。
 4. 当天日期。
 
-构造上下文时，后端在 `wiki_lock` 内拍摄 `index.md`、`overview.md` 以及
-`sources/`、`entities/`、`concepts/` 下 Markdown 页的只读快照。`index.md` 只用于
-快照完整性，不参与候选或 Prompt 上下文。其余页面按标题和正文与来源中的词法词语、
+构造上下文时，后端在 `wiki_lock` 内拍摄 `overview.md` 以及 `sources/`、`entities/`、
+`concepts/` 下 Markdown 页的只读快照。这些页面按标题和正文与来源中的词法词语、
 WikiLink 进行评分；候选按评分、路径和标题稳定排序。选择时优先为 Overview 及每种
 其他页面类型各保留一次机会，再在预算内补齐其余候选。单个片段最大 4,096 tokens，
 Wiki 上下文最多 16,384 tokens，并会结合模型可用输入空间及最终 Prompt 预算移除低分片段。
@@ -95,8 +94,7 @@ Prompt 要求模型返回一个 JSON 对象：成功结果包含 `title`、`slug
 `entity_index_entries`/`concept_index_entries`、`contradictions` 和
 `log_entry`；无法可靠处理时返回 `ingest_status="failed"` 与 `ingest_error`。
 
-说明文件中曾描述“高层综合有实质变化时可返回 `overview_update`”，但外层 JSON 合约明确要求
-始终为 `null`。后端仍会接受非空 `overview_update`，并直接覆盖 `wiki/overview.md`。
+Ingest 不修改 `wiki/overview.md`，成功响应中也不包含 Overview 更新字段。
 
 ## 4. 模型档案与思考模式
 
@@ -209,7 +207,7 @@ Pydantic 校验成功后，在 `wiki_lock` 内执行写入：
    scheduled 只保留 `source_url`。
 5. `index_entry` 插入 `wiki/index.md` 的 `## Sources`；每个新建 Entity/Concept 都必须分别提供
    对应分区的索引条目，后端将其写入 `## Entities` 或 `## Concepts`。
-6. `log_entry` 写入 `wiki/log.md`；若 `overview_update` 非空则覆盖 `wiki/overview.md`。
+6. `log_entry` 写入 `wiki/log.md`；Ingest 不修改 `wiki/overview.md`。
 
 写完后，`_validate_ingest()` 仅检查本次知识页：
 

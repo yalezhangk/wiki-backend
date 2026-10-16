@@ -272,10 +272,8 @@ class IngestService:
         self._wiki_dir = self._agent_root / "wiki"
         self._upload_dir = self._agent_root / "raw" / "uploads"
         self._index_file = self._wiki_dir / "index.md"
-        self._overview_file = self._wiki_dir / "overview.md"
         self._log_file = self._wiki_dir / "log.md"
         self._call_llm_main: Callable[[str, int | None], str] | None = None
-        self._last_llm_result_raw: str | None = None
         self._max_upload_bytes = max_upload_bytes
         self._ingest_llm_max_tokens = ingest_llm_max_tokens
         self._publish_service = publish_service
@@ -472,7 +470,6 @@ class IngestService:
             source_content=source_content,
             ingest_profile=ingest_profile,
         )
-        self._assert_prompt_fits_model_context(prompt=prompt, ingest_profile=ingest_profile)
         try:
             raw = self._call_llm_with_retry(prompt, ingest_profile=ingest_profile)
         except IngestLLMResponseTruncatedError as exc:
@@ -489,8 +486,7 @@ class IngestService:
                     debug_path,
                 )
             raise
-        parsed = self._parse_llm_result_with_repair(
-            prompt=prompt,
+        parsed, parsed_raw = self._parse_llm_result_with_repair(
             raw=raw,
             source_path=source_path,
             job_id=job_id,
@@ -513,7 +509,7 @@ class IngestService:
                 source_path=source_path,
                 job_id=job_id,
                 label="schema",
-                content=self._last_llm_result_raw or raw,
+                content=parsed_raw,
             )
             LOGGER.warning(
                 "LLM ingest JSON failed schema validation job_id=%s debug_path=%s",
@@ -580,15 +576,14 @@ class IngestService:
     def _parse_llm_result_with_repair(
         self,
         *,
-        prompt: str,
         raw: str,
         source_path: Path,
         job_id: int,
         ingest_profile: IngestModelProfile | None = None,
-    ) -> dict[str, Any]:
-        self._last_llm_result_raw = raw
+    ) -> tuple[dict[str, Any], str]:
+        """返回解析后的对象及最终用于解析的原始响应。"""
         try:
-            return self._parse_json_from_response(raw)
+            return self._parse_json_from_response(raw), raw
         except IngestServiceError as first_error:
             first_debug_path = self._write_llm_debug_response(
                 source_path=source_path,
@@ -612,7 +607,7 @@ class IngestService:
             "Only repair JSON structure; do not add facts, pages, claims, or content not present in the invalid response. "
             "Do not include markdown fences, explanations, apologies, analysis, or any text outside the JSON object."
             " Required top-level fields for success are ingest_status, ingest_error, title, slug, source_page, "
-            "index_entry, overview_update, entity_pages, concept_pages, entity_index_entries, concept_index_entries, "
+            "index_entry, entity_pages, concept_pages, entity_index_entries, concept_index_entries, "
             "entity_patches, concept_patches, "
             "contradictions, and log_entry."
             "\n\n=== INVALID RESPONSE START ===\n"
@@ -620,9 +615,8 @@ class IngestService:
             "=== INVALID RESPONSE END ==="
         )
         retry_raw = self._call_llm_with_retry(repair_prompt, ingest_profile=selected_profile)
-        self._last_llm_result_raw = retry_raw
         try:
-            return self._parse_json_from_response(retry_raw)
+            return self._parse_json_from_response(retry_raw), retry_raw
         except IngestServiceError as retry_error:
             retry_debug_path = self._write_llm_debug_response(
                 source_path=source_path,
@@ -697,8 +691,6 @@ class IngestService:
 
         changed_knowledge_pages = list(dict.fromkeys([*(path for path, _ in generated_pages), *patch_pages]))
         changed_pages = [*changed_knowledge_pages, "index.md", "log.md"]
-        if data.overview_update:
-            changed_pages.append("overview.md")
         existed_before = {
             path: (self._wiki_dir / path).exists()
             for path in changed_pages
@@ -709,8 +701,6 @@ class IngestService:
         for path, content in patch_pages.items():
             self._atomic_write(self._wiki_dir / path, content)
 
-        if data.overview_update:
-            self._atomic_write(self._overview_file, data.overview_update)
         self._update_index(data.index_entry, section="Sources")
         for entry in entity_index_entries:
             self._update_index(entry, section="Entities")
@@ -859,20 +849,6 @@ class IngestService:
                         raise IngestValidationError("file content does not match .epub extension")
             except (KeyError, zipfile.BadZipFile) as exc:
                 raise IngestValidationError("file content does not match .epub extension") from exc
-
-    def _build_prompt(
-        self,
-        *,
-        source: Path,
-        source_content: str,
-        ingest_profile: IngestModelProfile | None = None,
-    ) -> str:
-        prompt, _ = self._build_prompt_with_snapshot(
-            source=source,
-            source_content=source_content,
-            ingest_profile=ingest_profile,
-        )
-        return prompt
 
     def _build_prompt_with_snapshot(
         self,

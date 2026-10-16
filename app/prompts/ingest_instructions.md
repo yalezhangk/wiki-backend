@@ -29,8 +29,7 @@ Process the source in this order:
    contradictions.
 3. Create exactly one source page at `wiki/sources/<slug>.md`.
 4. Provide one entry for the `## Sources` section of `wiki/index.md`.
-5. Return a complete replacement for `wiki/overview.md` only when the source
-   materially changes the high-level synthesis; otherwise return `null`.
+5. Do not modify `wiki/overview.md` during Ingest.
 6. Create or update focused entity and concept pages only for key information
    grounded in the source. Preserve existing facts unless the source provides a
    concrete correction.

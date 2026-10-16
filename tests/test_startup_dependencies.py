@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from app.config import PROJECT_ROOT, Settings
 from app.main import create_app
 from app.schemas.query import CitationResponse, QueryResult
-from app.services.ingest_service import IngestService
+from app.services.ingest_service import IngestService, call_llm_profile
 from app.services.query_service import QueryService, QueryServiceError
 
 
@@ -161,14 +161,9 @@ class StartupDependencyTests(unittest.TestCase):
     def test_services_load_backend_owned_llm_callers(self) -> None:
         missing_root = Path(tempfile.gettempdir()) / "missing-llm-wiki-agent-for-llm-test"
         query_service = QueryService(missing_root)
-        ingest_service = IngestService(
-            storage=object(),  # type: ignore[arg-type]
-            agent_root=missing_root,
-            start_worker=False,
-        )
 
         query_fast, query_main = query_service._load_llm_callers()
-        ingest_main = ingest_service._load_llm_caller()
+        ingest_main = call_llm_profile
 
         self.assertEqual(query_fast.__module__, "app.llm_config")
         self.assertEqual(query_main.__module__, "app.llm_config")

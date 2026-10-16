@@ -59,7 +59,6 @@ class IngestLLMResult(BaseModel):
     slug: str
     source_page: str
     index_entry: str
-    overview_update: str | None = None
     entity_pages: list[IngestGeneratedPage] = Field(default_factory=list)
     concept_pages: list[IngestGeneratedPage] = Field(default_factory=list)
     entity_index_entries: list[IngestIndexEntry] = Field(default_factory=list)

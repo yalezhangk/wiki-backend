@@ -472,22 +472,22 @@ class IngestServiceTests(unittest.TestCase):
         retry_payload = (
             '{"ingest_status":"succeeded","ingest_error":null,"title":"Report","slug":"report","source_page":"# Report",'
             '"index_entry":"- [Report](sources/report.md) - summary",'
-            '"overview_update":null,"entity_pages":[],"concept_pages":[],'
+            '"entity_pages":[],"concept_pages":[],'
             '"contradictions":[],"log_entry":"## log"}'
         )
         self.service._call_llm_main = lambda prompt, max_tokens=None: retry_payload  # type: ignore[method-assign]
 
-        parsed = self.service._parse_llm_result_with_repair(
-            prompt="prompt",
+        parsed, parsed_raw = self.service._parse_llm_result_with_repair(
             raw="I cannot produce JSON for this document.",
             source_path=source_path,
             job_id=1,
         )
 
         self.assertEqual(parsed["slug"], "report")
+        self.assertEqual(parsed_raw, retry_payload)
         self.assertTrue((source_path.parent / "report.1.initial.llm-response.txt").exists())
 
-    def test_json_repair_prompt_excludes_original_main_prompt(self) -> None:
+    def test_json_repair_prompt_contains_only_invalid_response_and_contract(self) -> None:
         source_path = self.agent_root / "raw" / "uploads" / "report.md"
         source_path.parent.mkdir(parents=True)
         source_path.write_text("# Report", encoding="utf-8")
@@ -495,12 +495,11 @@ class IngestServiceTests(unittest.TestCase):
         payload = (
             '{"ingest_status":"succeeded","ingest_error":null,"title":"Report","slug":"report",'
             '"source_page":"# Report","index_entry":"- [Report](sources/report.md)",'
-            '"overview_update":null,"entity_pages":[],"concept_pages":[],"contradictions":[],"log_entry":"## log"}'
+            '"entity_pages":[],"concept_pages":[],"contradictions":[],"log_entry":"## log"}'
         )
         self.service._call_llm_main = lambda prompt, max_tokens=None: prompts.append(prompt) or payload  # type: ignore[method-assign]
 
         self.service._parse_llm_result_with_repair(
-            prompt="=== SOURCE START ===\nsecret source\n=== SOURCE END ===",
             raw="not json",
             source_path=source_path,
             job_id=1,
@@ -508,8 +507,9 @@ class IngestServiceTests(unittest.TestCase):
 
         self.assertEqual(len(prompts), 1)
         self.assertNotIn("=== SOURCE START ===", prompts[0])
-        self.assertNotIn("secret source", prompts[0])
         self.assertIn("not json", prompts[0])
+        self.assertIn("entity_patches", prompts[0])
+        self.assertNotIn("overview_update", prompts[0])
 
     def test_parse_truncated_json_is_not_sent_to_json_repair(self) -> None:
         source_path = self.agent_root / "raw" / "uploads" / "report.md"
@@ -526,7 +526,6 @@ class IngestServiceTests(unittest.TestCase):
 
         with self.assertRaises(IngestLLMResponseTruncatedError):
             self.service._parse_llm_result_with_repair(
-                prompt="prompt",
                 raw='{"title":"unfinished',
                 source_path=source_path,
                 job_id=2,
@@ -569,7 +568,6 @@ class IngestServiceTests(unittest.TestCase):
 
         with self.assertRaises(IngestLLMInvalidJSONError) as context:
             self.service._parse_llm_result_with_repair(
-                prompt="prompt",
                 raw="not json",
                 source_path=source_path,
                 job_id=3,
@@ -729,7 +727,7 @@ class IngestServiceTests(unittest.TestCase):
         llm_payload = (
             '{"ingest_status":"succeeded","ingest_error":null,"title":"Scan","slug":"scan",'
             '"source_page":"# Scan","index_entry":"- [Scan](sources/scan.md) - summary",'
-            '"overview_update":null,"entity_pages":[],"concept_pages":[],'
+            '"entity_pages":[],"concept_pages":[],'
             '"contradictions":[],"log_entry":"## log"}'
         )
         self.service._call_llm_main = lambda prompt, max_tokens=None: llm_payload  # type: ignore[method-assign]
@@ -807,18 +805,21 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(result, converted)
         rapidocr_converter.assert_called_once_with(source)
 
-    def test_build_prompt_disables_overview_rewrite(self) -> None:
+    def test_build_prompt_excludes_overview_rewrite(self) -> None:
         source = self.agent_root / "raw" / "uploads" / "report.md"
         source.parent.mkdir(parents=True)
         source.write_text("# Report", encoding="utf-8")
 
-        prompt = self.service._build_prompt(source=source, source_content="# Report")
+        prompt, _ = self.service._build_prompt_with_snapshot(
+            source=source,
+            source_content="# Report",
+        )
 
         self.assertIn("Ingest Wiki Instructions", prompt)
         self.assertIn("## Ingest Workflow", prompt)
         self.assertIn("Create exactly one source page", prompt)
         self.assertNotIn("Query Workflow", prompt)
-        self.assertIn('"overview_update": null', prompt)
+        self.assertNotIn("overview_update", prompt)
         self.assertIn("Do not rewrite or reproduce `wiki/overview.md`", prompt)
         self.assertIn('"ingest_status": "succeeded"', prompt)
         self.assertIn('"ingest_status": "failed"', prompt)
@@ -837,7 +838,7 @@ class IngestServiceTests(unittest.TestCase):
         unrelated_path.parent.mkdir(parents=True, exist_ok=True)
         unrelated_path.write_text("# Recent\n\n## Unrelated\nUnrelated material.", encoding="utf-8")
 
-        prompt = self.service._build_prompt(
+        prompt, _ = self.service._build_prompt_with_snapshot(
             source=self.agent_root / "raw" / "uploads" / "manual" / "report.md",
             source_content="# Graphite battery\n\nGraphite battery anode research.",
         )
@@ -849,10 +850,10 @@ class IngestServiceTests(unittest.TestCase):
         self.assertNotIn("Unrelated material", prompt)
         self.assertEqual(
             prompt,
-            self.service._build_prompt(
+            self.service._build_prompt_with_snapshot(
                 source=self.agent_root / "raw" / "uploads" / "manual" / "report.md",
                 source_content="# Graphite battery\n\nGraphite battery anode research.",
-            ),
+            )[0],
         )
 
     def test_build_prompt_uses_explicit_empty_context_for_zero_matches(self) -> None:
@@ -861,7 +862,7 @@ class IngestServiceTests(unittest.TestCase):
             "# Astronomy\n\n## Telescope\nOptical telescope.", encoding="utf-8"
         )
 
-        prompt = self.service._build_prompt(
+        prompt, _ = self.service._build_prompt_with_snapshot(
             source=self.agent_root / "raw" / "uploads" / "manual" / "report.md",
             source_content="# Battery\n\nGraphite anode research.",
         )
@@ -898,7 +899,7 @@ class IngestServiceTests(unittest.TestCase):
         llm_payload = (
             '{"ingest_status":"succeeded","ingest_error":null,"title":"Report","slug":"report","source_page":"# Report",'
             '"index_entry":"- [Report](sources/report.md) - summary",'
-            '"overview_update":null,"entity_pages":[],"concept_pages":[],'
+            '"entity_pages":[],"concept_pages":[],'
             '"contradictions":[],"log_entry":"## log"}'
         )
         self.service._call_llm_main = lambda prompt, max_tokens=None: llm_payload  # type: ignore[method-assign]
@@ -926,7 +927,7 @@ class IngestServiceTests(unittest.TestCase):
         llm_payload = (
             '{"ingest_status":"succeeded","ingest_error":null,"title":"Report","slug":"report","source_page":"# Report",'
             '"index_entry":"- [Report](sources/report.md) - summary",'
-            '"overview_update":null,"entity_pages":[],"concept_pages":[],'
+            '"entity_pages":[],"concept_pages":[],'
             '"contradictions":[],"log_entry":"## log"}'
         )
         self.service._call_llm_main = lambda prompt, max_tokens=None: llm_payload  # type: ignore[method-assign]
@@ -1079,7 +1080,7 @@ class IngestServiceTests(unittest.TestCase):
                 },
             )
 
-    def test_ingest_updates_overview_when_llm_returns_full_content(self) -> None:
+    def test_ingest_ignores_legacy_overview_update_field(self) -> None:
         overview_path = self.agent_root / "wiki" / "overview.md"
         overview_path.write_text("# Old Overview", encoding="utf-8")
         upload = UploadFile(filename="report.md", file=io.BytesIO(b"# Report"))
@@ -1095,8 +1096,8 @@ class IngestServiceTests(unittest.TestCase):
         self.service._run_job(job.job_id)
 
         completed = self.storage.jobs[job.job_id]
-        self.assertIn("overview.md", completed.updated_pages)
-        self.assertEqual(overview_path.read_text(encoding="utf-8"), "# New Overview")
+        self.assertNotIn("overview.md", completed.updated_pages)
+        self.assertEqual(overview_path.read_text(encoding="utf-8"), "# Old Overview")
 
     def test_append_log_inserts_new_entry_below_template_separator(self) -> None:
         log_path = self.agent_root / "wiki" / "log.md"
@@ -1204,7 +1205,7 @@ class IngestServiceTests(unittest.TestCase):
         llm_payload = (
             '{"ingest_status":"succeeded","ingest_error":null,"title":"Report","slug":"report","source_page":"# Report",'
             '"index_entry":"- [Report](sources/report.md) - summary",'
-            '"overview_update":null,"entity_pages":[],"concept_pages":[],'
+            '"entity_pages":[],"concept_pages":[],'
             '"contradictions":[],"log_entry":"## log"}'
         )
         self.service._call_llm_main = lambda prompt, max_tokens=None: llm_payload  # type: ignore[method-assign]

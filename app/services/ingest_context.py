@@ -54,7 +54,7 @@ class WikiSnapshot:
 
     @classmethod
     def capture(cls, wiki_dir: Path) -> "WikiSnapshot":
-        paths = [wiki_dir / "index.md", wiki_dir / "overview.md"]
+        paths = [wiki_dir / "overview.md"]
         for directory in ("sources", "entities", "concepts"):
             paths.extend((wiki_dir / directory).rglob("*.md") if (wiki_dir / directory).is_dir() else [])
         pages: list[WikiPage] = []
@@ -99,8 +99,6 @@ class WikiContextRetriever:
         query_terms, links = self._query_terms(source_content)
         candidates: list[WikiCandidate] = []
         for page in self._snapshot.pages:
-            if page.path == "wiki/index.md":
-                continue
             page_type = page.path.split("/", 2)[1] if page.path.count("/") >= 1 else "overview"
             for heading, section in self._sections(page.content):
                 score = self._score(heading, section, query_terms, links)

@@ -24,6 +24,9 @@ from app.services.chat_service import ChatService
 from app.services.chat_turn_service import ChatTurnService
 from app.model_profiles import ModelProfileService
 from app.services.ingest_service import IngestService
+from app.services.ingest_large_document_orchestrator import (
+    LargeDocumentIngestOrchestrator,
+)
 from app.services.health_maintenance_service import HealthMaintenanceService
 from app.services.graph_maintenance_service import GraphMaintenanceService
 from app.services.lint_maintenance_service import LintMaintenanceService
@@ -94,6 +97,10 @@ def create_app(
                 storage=storage,
                 agent_root=Path(settings.llm_wiki_repo_path),
                 publish_service=app.state.publish_service,
+                large_document_ingestor=LargeDocumentIngestOrchestrator(
+                    wiki_dir=Path(settings.llm_wiki_repo_path) / "wiki",
+                    wiki_lock=app.state.wiki_lock,
+                ),
                 wiki_lock=app.state.wiki_lock,
             )
         if not hasattr(app.state, "chat_turn_service"):

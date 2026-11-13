@@ -1,12 +1,13 @@
 # 当前 Ingest 工作流
 
-本文只描述当前 `wiki-backend` 代码已经实现的 Ingest 行为。它不是目标架构、
-也不是后续可能增加的长文分块、相关 Wiki 检索或多阶段 Agent 方案。
+本文只描述当前 `wiki-backend` 代码已经实现的 Ingest 行为。它不是目标架构，
+也不包含跨进程恢复、人工审核或分布式任务调度等后续能力。
 
 ## 总览
 
-当前 Ingest 是单进程内存队列中的单 worker 工作流：对一份文档构造一次完整 Prompt，
-调用一次 Ingest 模型以取得完整 JSON；后端校验并写入 Wiki，最后加入 Quartz 发布队列。
+当前 Ingest 是单进程内存队列中的单 worker 工作流。小文档使用一次完整来源 Prompt；
+超过直通阈值的大文档使用确定性分块、证据抽取、文档级 Reduce、Wiki 检索和逐页生成。
+两条路径最终都组装为同一个 `IngestLLMResult`，再由后端校验并写入 Wiki。
 
 ```text
 POST /api/ingest/jobs
@@ -16,10 +17,14 @@ POST /api/ingest/jobs
   -> daemon worker
        -> 转 Markdown / PDF OCR（需要时）
        -> 文本质量预检
-       -> 拼完整 Prompt
-       -> 一次 LLM 完整 JSON 生成
-       -> JSON 解析；非截断错误时可修复一次
-       -> Pydantic 结果校验
+       -> <= 24,576 tokens：完整来源 Prompt -> IngestLLMResult
+       -> > 24,576 tokens：
+            -> Markdown 结构感知分块
+            -> 顺序 Chunk Evidence Extraction
+            -> Document Knowledge Plan（必要时固定 fan-in 层级归并）
+            -> 按 Knowledge Plan 检索固定 Wiki 快照
+            -> 逐个生成知识页动作和唯一 Source 页面
+            -> 组装并校验 IngestLLMResult
        -> 写 Source / Entity / Concept / index / log
        -> 断链与索引校验
   -> MySQL 标记 succeeded 或 failed
@@ -69,9 +74,9 @@ Markdown。PDF 先检查文本层：有文本层时优先 MarkItDown，失败时
 非 Markdown 任务在转换时进度为 `converting/10%`；可用 Markdown 准备完成后进入
 `extracting/35%`。
 
-## 3. Prompt 的实际组成
+## 3. 小文档直通 Prompt
 
-当前只有一个主 Prompt，模板为 `app/prompts/ingest.md`，其中嵌入
+不超过 24,576 tokens 的来源使用主 Prompt `app/prompts/ingest.md`，其中嵌入
 `app/prompts/ingest_instructions.md`。它以单条 `user` message 发送给模型，组成顺序为：
 
 1. 固定 Ingest 角色和 JSON 输出合约。
@@ -86,8 +91,8 @@ WikiLink 进行评分；候选按评分、路径和标题稳定排序。选择�
 Wiki 上下文最多 16,384 tokens，并会结合模型可用输入空间及最终 Prompt 预算移除低分片段。
 没有命中或没有可用预算时，Prompt 会包含明确的空证据占位。
 
-因此当前实现会按相关性检索受限 Wiki 小节，但不会对来源文档做 chunk/reduce；来源正文始终
-完整进入单次 Prompt，并受单次来源与最终模型上下文预算限制。
+直通路径会按相关性检索受限 Wiki 小节；来源正文完整进入单次 Prompt，并受单次来源与最终模型
+上下文预算限制。
 
 Prompt 要求模型返回一个 JSON 对象：成功结果包含 `title`、`slug`、完整
 `source_page`、`index_entry`、可选 `entity_pages`/`concept_pages`、与新页一一对应的
@@ -96,14 +101,32 @@ Prompt 要求模型返回一个 JSON 对象：成功结果包含 `title`、`slug
 
 Ingest 不修改 `wiki/overview.md`，成功响应中也不包含 Overview 更新字段。
 
+## 3.1 大文档分阶段生成
+
+超过 24,576 tokens 的来源由 `LargeDocumentIngestOrchestrator` 串行执行：
+
+1. `MarkdownChunker` 按标题、段落、列表、表格和 fenced code block 确定性分块，并校验原文覆盖、
+   顺序、硬上限和显式 overlap。
+2. `ChunkEvidenceExtractor` 逐块抽取带行号和原文片段的结构化 evidence；无效 JSON 只修复一次。
+3. `DocumentKnowledgeReducer` 生成唯一文档计划；直接 Reduce 超预算时按固定 fan-in 归并相邻 section，
+   不截断末尾 chunk。
+4. `KnowledgePlanWikiRetriever` 只使用计划中的标题、claims、实体、概念和 purpose，在 `wiki_lock`
+   内拍摄一次 Wiki 快照并绑定页面 hash。
+5. `LargeDocumentPageGenerator` 逐个生成 Entity/Concept 的 `create`、受快照 hash 约束的 `patch` 或
+   `skip`，最后生成唯一 Source 页面。
+6. 后端确定性构造索引和日志，并组装 `IngestLLMResult`。全部结果校验完成前不写正式 Wiki。
+
+Chunk extraction 不读取 Wiki，也不能写 Wiki。每个页面生成调用只接收该页面引用的 evidence 和相关
+Wiki 候选；模型不能 patch 未检索到的路径。任一阶段最终失败时整个 job 失败，沿用失败上传文件清理语义。
+
 ## 4. 模型档案与思考模式
 
 Ingest 只接受服务端白名单模型：
 
 | 模型标识 | 思考模式 | 本地上下文预检 |
 | --- | --- | --- |
-| `deepseek/deepseek-v4-flash` | 强制关闭 | 不做本地硬限制 |
-| `deepseek/deepseek-v4-pro` | 强制关闭 | 不做本地硬限制 |
+| `deepseek/deepseek-v4-flash` | 强制关闭 | 按服务端档案预算检查 |
+| `deepseek/deepseek-v4-pro` | 强制关闭 | 按服务端档案预算检查 |
 | `ollama_chat/qwen3.8:27b` | 强制关闭 | 做 65,536 token 预算检查 |
 
 DeepSeek V4 的 Ingest profile 固定为 `reasoning_effort="none"`，并通过
@@ -120,13 +143,14 @@ Qwen Ingest 同样固定为 `reasoning_effort="none"`。这仅限当前结构化
 completion(
     model="<provider>/<model>",
     messages=[{"role": "user", "content": prompt}],
-    max_tokens=WIKI_BACKEND_INGEST_LLM_MAX_TOKENS,
+    max_tokens=<当前阶段预算>,
     temperature=WIKI_BACKEND_LLM_MAIN_TEMPERATURE,
 )
 ```
 
-当前默认输出预算为 `WIKI_BACKEND_INGEST_LLM_MAX_TOKENS=8192`。这是一整次
-completion 的输出上限，必须容纳 Source、Entity、Concept、索引项和日志项的全部 JSON。
+直通路径默认使用 `WIKI_BACKEND_INGEST_LLM_MAX_TOKENS=8192`。大文档的 Chunk、Section、
+Document Reduce、Source Page 和 Knowledge Page 使用各自阶段预算；实际值不超过全局 Ingest 上限
+和模型档案允许值。
 
 ## 5. Token 预算和上下文检查
 
@@ -142,7 +166,7 @@ completion 的输出上限，必须容纳 Source、Entity、Concept、索引项�
 
   ```text
   估算输入 <= 档案 max_input_tokens
-  估算输入 + Ingest 输出预算 + 档案 safety_margin_tokens <= context_window_tokens
+  估算输入 + 当前调用输出预算 + 档案 safety_margin_tokens <= context_window_tokens
   ```
 
   不满足时，在调用模型前以 `ingest_source_context_too_large` 失败。
@@ -151,9 +175,9 @@ Ollama 服务必须实际分配至少 65,536 token 上下文，例如通过服�
 `OLLAMA_CONTEXT_LENGTH=65536` 配置；模型声明的 262,144 token 原生窗口不等于
 Ollama 当前运行时的上下文分配。
 
-转换后 Markdown 估算不超过 24,576 tokens 才会进入单次完整来源路径；正文绝不为 Wiki
-上下文而截断。超过该值会在调用 LLM 前以 `ingest_source_context_too_large` 失败。长文
-chunk/reduce 尚未实施。
+转换后 Markdown 估算不超过 24,576 tokens 时进入单次完整来源路径；正文绝不为 Wiki 上下文而
+截断。超过该值时自动进入大文档路径，每个阶段仍独立执行 Prompt 预算检查；无法安全分块或任一
+阶段 Prompt 超预算时以对应的稳定错误类别失败，不写部分 Wiki。
 
 Wiki 上下文在 `wiki_lock` 内拍摄只读快照；`index.md` 不参与候选或 Prompt 上下文，
 `overview.md`、`sources/`、`entities/` 和 `concepts/` 的小节才会参与检索。检索按来源中的
@@ -176,7 +200,8 @@ Wiki 上下文在 `wiki_lock` 内拍摄只读快照；`index.md` 不参与候选
 
 | 情况 | 行为 |
 | --- | --- |
-| `finish_reason=length` 或明显未闭合 JSON | 不修复，任务失败；若有部分内容，保存 `*.truncated.llm-response.txt` |
+| 直通响应 `finish_reason=length` 或明显未闭合 JSON | 不修复，任务失败；若有部分内容，保存 `*.truncated.llm-response.txt` |
+| 大文档单页响应截断 | 只重试当前页面一次，不重新执行 chunk extraction |
 | 网络超时、连接错误、429、5xx、空最终内容 | 等待 0.25 秒后重试一次 |
 | 非截断的无效 JSON | 保存初始响应，构造 JSON repair Prompt，再调用模型一次 |
 | repair 后仍无效 | 任务失败，保存 retry 响应 |
@@ -237,9 +262,11 @@ Ingest 的 `succeeded` 解释为站点已更新。
 
 ## 当前实现的边界
 
-- 单次完整 Prompt、单次主生成；没有长文分块、分阶段抽取、reduce 或事实草稿。
-- Wiki 上下文使用基于来源词语和 WikiLink 的词法小节检索，不使用向量检索或长文 chunk/reduce。
+- 小文档使用单次完整 Prompt；大文档使用进程内串行分阶段编排，但没有跨重启 checkpoint。
+- Wiki 上下文使用确定性词法小节检索，不使用向量检索。
 - 所有 Ingest 模型档案都在调用前检查输入、输出和安全余量预算；这不是供应商 tokenizer 的精确计数。
 - JSON 依靠 Prompt 和后验解析/Pydantic；没有供应商级 JSON Schema 约束。
 - 链接和索引校验是报告型，不是阻断型质量门。
 - 队列为当前进程内存队列，不能替代持久化、可恢复的任务调度。
+- 大文档管线已于 2026-10-20 通过真实 49,655-token RM6 文档、DGX
+  `qwen3.8:27b`、MySQL、Wiki 和 Quartz 发布验收。后续更改分阶段合约时仍需重新显式执行真实验证。

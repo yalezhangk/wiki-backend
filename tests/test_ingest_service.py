@@ -13,18 +13,25 @@ from unittest.mock import patch
 from fastapi import UploadFile
 from pydantic import ValidationError
 
-from app.llm_config import LLMConfigError, LLMResponseTruncatedError
+from app.llm_config import IngestModelProfile, LLMConfigError, LLMResponseTruncatedError
 from app.schemas.ingest import IngestJobResponse, IngestLLMResult, IngestValidation
 from app.services.ingest_service import (
     IngestConflictError,
     IngestContentQualityError,
     IngestLLMInvalidJSONError,
     IngestLLMResponseTruncatedError,
+    IngestGenerationResult,
     IngestServiceError,
     IngestService,
     IngestValidationError,
 )
 from app.services.ingest_context import SMALL_SOURCE_MAX_TOKENS, PromptBudget, TokenEstimator
+from app.services.ingest_large_document_status import (
+    LargeDocumentLLMCaller,
+    LargeDocumentProgressCallback,
+    LargeDocumentProgressEvent,
+    LargeDocumentStageError,
+)
 from app.storage.mysql import DuplicateDocumentNameError, MySQLStorage
 
 
@@ -195,6 +202,49 @@ class FakeStorage:
         )
 
 
+class FakeLargeDocumentIngestor:
+    def __init__(
+        self,
+        *,
+        result: IngestGenerationResult | None = None,
+        error: Exception | None = None,
+        progress_events: list[LargeDocumentProgressEvent] | None = None,
+    ) -> None:
+        self.result = result
+        self.error = error
+        self.progress_events = progress_events or []
+        self.calls: list[tuple[int, Path, str, str]] = []
+
+    def ingest(
+        self,
+        *,
+        job: IngestJobResponse,
+        source: Path,
+        source_content: str,
+        ingest_profile: IngestModelProfile,
+        call_llm: LargeDocumentLLMCaller,
+        progress_callback: LargeDocumentProgressCallback,
+    ) -> IngestGenerationResult:
+        self.calls.append(
+            (job.job_id, source, source_content, ingest_profile.model_identifier)
+        )
+        for event in self.progress_events:
+            progress_callback(event)
+        if self.error is not None:
+            raise self.error
+        if self.result is None:
+            raise AssertionError("fake large-document result was not configured")
+        return self.result
+
+
+class FakePublishService:
+    def __init__(self) -> None:
+        self.queued_changes: list[tuple[str, str]] = []
+
+    def queue_change(self, *, source_kind: str, source_id: str) -> None:
+        self.queued_changes.append((source_kind, source_id))
+
+
 class IngestServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -209,6 +259,63 @@ class IngestServiceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_validation_resolves_path_wikilink_with_display_alias(self) -> None:
+        wiki_dir = self.agent_root / "wiki"
+        (wiki_dir / "sources").mkdir()
+        (wiki_dir / "entities").mkdir()
+        (wiki_dir / "sources" / "manual.md").write_text(
+            "[[entities/rm6|RM6 SeT]]\n",
+            encoding="utf-8",
+        )
+        (wiki_dir / "entities" / "rm6.md").write_text(
+            "# RM6\n",
+            encoding="utf-8",
+        )
+        (wiki_dir / "index.md").write_text(
+            "[Manual](sources/manual.md)\n",
+            encoding="utf-8",
+        )
+
+        validation = self.service._validate_ingest(["sources/manual.md"])
+
+        self.assertEqual(validation.broken_links, [])
+        self.assertEqual(validation.unindexed, [])
+
+    @staticmethod
+    def _large_document_result() -> IngestGenerationResult:
+        return IngestGenerationResult(
+            data=IngestLLMResult(
+                ingest_status="succeeded",
+                ingest_error=None,
+                title="Large Report",
+                slug="large-report",
+                source_page="# Large Report",
+                index_entry="- [Large Report](sources/large-report.md) - summary",
+                log_entry="## log",
+            ),
+            selected_page_hashes={},
+        )
+
+    def _create_stored_markdown_job(
+        self,
+        *,
+        filename: str,
+        source_content: str,
+    ) -> IngestJobResponse:
+        relative_source_path = Path("raw") / "uploads" / "manual" / filename
+        source_path = self.agent_root / relative_source_path
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text(source_content, encoding="utf-8")
+        return self.storage.create_ingest_job(
+            status="queued",
+            original_filename=filename,
+            stored_filename=filename,
+            source_path=relative_source_path.as_posix(),
+            document_name_key=Path(filename).stem.casefold(),
+            ingest_model=self.service._resolve_ingest_profile().model_identifier,
+            created_at=datetime(2026, 10, 19, 15, 0, 0),
+        )
 
     def test_create_job_saves_markdown_upload(self) -> None:
         upload = UploadFile(filename="../report.md", file=io.BytesIO(b"# Report"))
@@ -591,6 +698,41 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(service._call_llm_with_retry("prompt"), "{}")
         self.assertEqual(observed_max_tokens, [12288])
 
+    def test_large_document_stage_can_use_smaller_output_budget(self) -> None:
+        observed_max_tokens: list[int | None] = []
+        self.service._call_llm_main = lambda prompt, max_tokens=None: (  # type: ignore[method-assign]
+            observed_max_tokens.append(max_tokens) or "{}"
+        )
+
+        result = self.service._call_llm_with_retry(
+            "prompt",
+            max_tokens=2048,
+            translate_truncation=False,
+        )
+
+        self.assertEqual(result, "{}")
+        self.assertEqual(observed_max_tokens, [2048])
+
+    def test_large_document_stage_preserves_provider_truncation(self) -> None:
+        truncated = LLMResponseTruncatedError(
+            model="qwen3.8:27b",
+            max_tokens=2048,
+            finish_reason="length",
+            response_content='{"partial":',
+        )
+        self.service._call_llm_main = lambda prompt, max_tokens=None: (  # type: ignore[method-assign]
+            _ for _ in ()
+        ).throw(truncated)
+
+        with self.assertRaises(LLMResponseTruncatedError) as raised:
+            self.service._call_llm_with_retry(
+                "prompt",
+                max_tokens=2048,
+                translate_truncation=False,
+            )
+
+        self.assertIs(raised.exception, truncated)
+
     def test_qwen_ingest_prompt_over_context_fails_before_llm_call(self) -> None:
         with patch("app.services.ingest_service.settings.ingest_provider", "ollama_chat"), patch(
             "app.services.ingest_service.settings.ingest_model", "qwen3.8:27b"
@@ -872,8 +1014,10 @@ class IngestServiceTests(unittest.TestCase):
 
     def test_source_above_small_source_limit_never_calls_llm(self) -> None:
         source_content = "中" * (SMALL_SOURCE_MAX_TOKENS + 1)
-        upload = UploadFile(filename="large.md", file=io.BytesIO(source_content.encode("utf-8")))
-        job = asyncio.run(self.service.create_job(file=upload))
+        job = self._create_stored_markdown_job(
+            filename="large.md",
+            source_content=source_content,
+        )
         self.service._call_llm_main = lambda prompt, max_tokens=None: (_ for _ in ()).throw(
             AssertionError("超出直通来源上限时不应调用 LLM")
         )  # type: ignore[method-assign]
@@ -883,8 +1027,231 @@ class IngestServiceTests(unittest.TestCase):
         self.assertTrue(self.storage.jobs[job.job_id].error.startswith("ingest_source_context_too_large:"))
         self.assertFalse((self.agent_root / job.source_path).exists())
 
+    def test_source_above_small_source_limit_uses_large_document_ingestor(self) -> None:
+        large_document_ingestor = FakeLargeDocumentIngestor(
+            result=self._large_document_result(),
+            progress_events=[
+                LargeDocumentProgressEvent(
+                    phase="chunk_extraction",
+                    completed=2,
+                    total=2,
+                    item_id="chunk-0002-test",
+                ),
+                LargeDocumentProgressEvent(
+                    phase="document_reduce",
+                    completed=1,
+                    total=1,
+                    item_id="document-plan",
+                ),
+                LargeDocumentProgressEvent(
+                    phase="wiki_retrieval",
+                    completed=1,
+                    total=1,
+                    item_id="wiki-snapshot",
+                ),
+                LargeDocumentProgressEvent(
+                    phase="page_generation",
+                    completed=3,
+                    total=3,
+                    item_id="source",
+                ),
+                LargeDocumentProgressEvent(
+                    phase="result_assembly",
+                    completed=1,
+                    total=1,
+                    item_id="document",
+                ),
+            ],
+        )
+        publish_service = FakePublishService()
+        service = IngestService(
+            storage=self.storage,
+            agent_root=self.agent_root,
+            start_worker=False,
+            publish_service=publish_service,  # type: ignore[arg-type]
+            large_document_ingestor=large_document_ingestor,
+        )
+        source_content = "中" * (SMALL_SOURCE_MAX_TOKENS + 1)
+        job = self._create_stored_markdown_job(
+            filename="large.md",
+            source_content=source_content,
+        )
+        service._call_llm_main = lambda prompt, max_tokens=None: (_ for _ in ()).throw(
+            AssertionError("大文档路径不应调用现有单次 Prompt")
+        )  # type: ignore[method-assign]
+
+        with patch.object(
+            service,
+            "_write_ingest_result",
+            wraps=service._write_ingest_result,
+        ) as write_result:
+            service._run_job(job.job_id)
+
+        self.assertEqual(len(large_document_ingestor.calls), 1)
+        called_job_id, called_source, called_content, called_model = large_document_ingestor.calls[0]
+        self.assertEqual(called_job_id, job.job_id)
+        self.assertEqual(called_source, self.agent_root / job.source_path)
+        self.assertEqual(called_content, source_content)
+        self.assertEqual(called_model, job.ingest_model)
+        write_result.assert_called_once()
+        self.assertEqual(self.storage.jobs[job.job_id].status, "succeeded")
+        self.assertEqual(
+            self.storage.jobs[job.job_id].created_pages.count("sources/large-report.md"),
+            1,
+        )
+        index_content = (self.agent_root / "wiki" / "index.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(index_content.count("[Large Report](sources/large-report.md)"), 1)
+        self.assertEqual(publish_service.queued_changes, [("ingest", str(job.job_id))])
+        self.assertEqual(
+            self.storage.progress_updates,
+            [
+                ("extracting", 35),
+                ("extracting", 49),
+                ("extracting", 54),
+                ("extracting", 57),
+                ("extracting", 63),
+                ("extracting", 64),
+                ("writing_wiki", 65),
+                ("validating", 85),
+            ],
+        )
+
+    def test_large_document_ingestor_failure_does_not_write_or_publish(self) -> None:
+        large_document_ingestor = FakeLargeDocumentIngestor(
+            error=IngestServiceError("large-document extraction failed")
+        )
+        publish_service = FakePublishService()
+        service = IngestService(
+            storage=self.storage,
+            agent_root=self.agent_root,
+            start_worker=False,
+            publish_service=publish_service,  # type: ignore[arg-type]
+            large_document_ingestor=large_document_ingestor,
+        )
+        source_content = "中" * (SMALL_SOURCE_MAX_TOKENS + 1)
+        job = self._create_stored_markdown_job(
+            filename="large.md",
+            source_content=source_content,
+        )
+
+        with patch.object(service, "_write_ingest_result") as write_result:
+            service._run_job(job.job_id)
+
+        write_result.assert_not_called()
+        self.assertEqual(self.storage.jobs[job.job_id].status, "failed")
+        self.assertEqual(
+            self.storage.jobs[job.job_id].error,
+            "large-document extraction failed",
+        )
+        self.assertFalse((self.agent_root / job.source_path).exists())
+        self.assertEqual(publish_service.queued_changes, [])
+
+    def test_large_document_stage_error_uses_safe_public_message(self) -> None:
+        stage_error = LargeDocumentStageError(
+            phase="chunk_extraction",
+            category="chunk_json_invalid",
+            item_id="chunk-0001-secret",
+        )
+        stage_error.__cause__ = RuntimeError("sensitive model response")
+        large_document_ingestor = FakeLargeDocumentIngestor(error=stage_error)
+        service = IngestService(
+            storage=self.storage,
+            agent_root=self.agent_root,
+            start_worker=False,
+            large_document_ingestor=large_document_ingestor,
+        )
+        job = self._create_stored_markdown_job(
+            filename="large.md",
+            source_content="中" * (SMALL_SOURCE_MAX_TOKENS + 1),
+        )
+
+        with self.assertLogs(
+            "app.services.ingest_service",
+            level="WARNING",
+        ) as captured:
+            service._run_job(job.job_id)
+
+        failed = self.storage.jobs[job.job_id]
+        self.assertEqual(
+            failed.error,
+            "chunk_json_invalid: 大文档的分块证据抽取失败。",
+        )
+        self.assertNotIn("sensitive model response", failed.error)
+        self.assertNotIn("chunk-0001-secret", failed.error)
+        self.assertNotIn(
+            "sensitive model response",
+            "\n".join(captured.output),
+        )
+
+    def test_large_document_progress_never_regresses(self) -> None:
+        large_document_ingestor = FakeLargeDocumentIngestor(
+            result=self._large_document_result(),
+            progress_events=[
+                LargeDocumentProgressEvent(
+                    phase="page_generation",
+                    completed=1,
+                    total=1,
+                ),
+                LargeDocumentProgressEvent(
+                    phase="document_reduce",
+                    completed=1,
+                    total=1,
+                ),
+            ],
+        )
+        service = IngestService(
+            storage=self.storage,
+            agent_root=self.agent_root,
+            start_worker=False,
+            large_document_ingestor=large_document_ingestor,
+        )
+        job = self._create_stored_markdown_job(
+            filename="large.md",
+            source_content="中" * (SMALL_SOURCE_MAX_TOKENS + 1),
+        )
+
+        service._run_job(job.job_id)
+
+        self.assertIn(("extracting", 63), self.storage.progress_updates)
+        self.assertNotIn(("extracting", 54), self.storage.progress_updates)
+
     def test_source_at_small_source_limit_is_accepted_for_direct_path(self) -> None:
         self.service._assert_source_is_direct_ingestable("中" * SMALL_SOURCE_MAX_TOKENS)
+
+    def test_source_at_small_source_limit_keeps_direct_path(self) -> None:
+        large_document_ingestor = FakeLargeDocumentIngestor(
+            error=AssertionError("边界小文档不应进入大文档路径")
+        )
+        service = IngestService(
+            storage=self.storage,
+            agent_root=self.agent_root,
+            start_worker=False,
+            large_document_ingestor=large_document_ingestor,
+        )
+        source_content = "中" * SMALL_SOURCE_MAX_TOKENS
+        job = self._create_stored_markdown_job(
+            filename="boundary.md",
+            source_content=source_content,
+        )
+        llm_payload = (
+            '{"ingest_status":"succeeded","ingest_error":null,'
+            '"title":"Boundary","slug":"boundary","source_page":"# Boundary",'
+            '"index_entry":"- [Boundary](sources/boundary.md) - summary",'
+            '"entity_pages":[],"concept_pages":[],"contradictions":[],'
+            '"log_entry":"## log"}'
+        )
+        llm_calls: list[str] = []
+        service._call_llm_main = (  # type: ignore[method-assign]
+            lambda prompt, max_tokens=None: llm_calls.append(prompt) or llm_payload
+        )
+
+        service._run_job(job.job_id)
+
+        self.assertEqual(large_document_ingestor.calls, [])
+        self.assertEqual(len(llm_calls), 1)
+        self.assertEqual(self.storage.jobs[job.job_id].status, "succeeded")
 
     def test_token_budget_accepts_boundary_and_rejects_one_token_over(self) -> None:
         budget = PromptBudget(10, 5, 5, 20)

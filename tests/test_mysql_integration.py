@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.main import create_app
+from app.model_profiles import ModelProfileService
 from app.schemas.chat import ChatMessageResponse
 from app.schemas.ingest import IngestValidation
 from app.schemas.query import CitationResponse, QueryResult
@@ -21,6 +22,7 @@ class StubQueryService:
         self,
         question: str,
         history_messages: list[ChatMessageResponse],
+        model_profile: object | None = None,
     ) -> QueryResult:
         return QueryResult(
             answer=f"## 数据库联调回答\n\n- 问题\n  - {question}\n\n```text\n保留缩进\n```",
@@ -58,6 +60,9 @@ class MySQLIntegrationTests(unittest.TestCase):
             chat_service=chat_service,
             query_service=StubQueryService(),  # type: ignore[arg-type]
             history_limit=settings.chat_history_limit,
+            model_profile_service=ModelProfileService(
+                availability_checker=lambda profile: True
+            ),
         )
         self.client = TestClient(
             create_app(
@@ -99,7 +104,10 @@ class MySQLIntegrationTests(unittest.TestCase):
 
         turn_response = self.client.post(
             f"/api/chats/{first_chat['id']}/messages",
-            json={"content": "MySQL 能保存多轮会话吗？\n  保留缩进"},
+            json={
+                "content": "MySQL 能保存多轮会话吗？\n  保留缩进",
+                "model_profile_id": "deepseek-v4-flash",
+            },
         )
         self.assertEqual(turn_response.status_code, 200)
         turn = turn_response.json()
@@ -130,7 +138,7 @@ class MySQLIntegrationTests(unittest.TestCase):
         self.assertEqual(rename_response.status_code, 200)
         self.assertEqual(rename_response.json()["title"], "已完成重命名")
 
-        second_chat_updated_at = datetime.utcnow().replace(microsecond=0) + timedelta(seconds=1)
+        second_chat_updated_at = datetime.now().replace(microsecond=0) + timedelta(seconds=1)
         self.storage.update_chat_activity(
             second_chat["id"],
             updated_at=second_chat_updated_at,
@@ -149,7 +157,7 @@ class MySQLIntegrationTests(unittest.TestCase):
     def test_tables_and_columns_have_comments(self) -> None:
         expected_column_counts = {
             "chats": 6,
-            "chat_messages": 10,
+            "chat_messages": 12,
             "maintenance_jobs": 16,
             "maintenance_page_state": 6,
             "maintenance_findings": 10,

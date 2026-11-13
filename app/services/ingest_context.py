@@ -5,7 +5,7 @@ import hashlib
 import math
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 SMALL_SOURCE_MAX_TOKENS = 24_576
@@ -99,7 +99,7 @@ class WikiContextRetriever:
         query_terms, links = self._query_terms(source_content)
         candidates: list[WikiCandidate] = []
         for page in self._snapshot.pages:
-            page_type = page.path.split("/", 2)[1] if page.path.count("/") >= 1 else "overview"
+            page_type = self._page_type(page.path)
             for heading, section in self._sections(page.content):
                 score = self._score(heading, section, query_terms, links)
                 if score:
@@ -108,15 +108,35 @@ class WikiContextRetriever:
                     )
         return sorted(candidates, key=lambda item: (-item.score, item.path, item.heading))
 
-    def select(self, source_content: str, available_tokens: int) -> tuple[list[WikiCandidate], list[str]]:
+    def select(
+        self,
+        source_content: str,
+        available_tokens: int,
+        *,
+        preferred_paths: set[str] | None = None,
+    ) -> tuple[list[WikiCandidate], list[str]]:
         if available_tokens <= 0:
             return [], ["budget_zero"]
         selected: list[WikiCandidate] = []
         skipped: list[str] = []
         used = 0
         candidates = self.candidates(source_content)
-        overview = [item for item in candidates if item.page_type == "overview"]
-        others = [item for item in candidates if item.page_type != "overview"]
+        preferred: list[WikiCandidate] = []
+        preferred_page_paths: set[str] = set()
+        requested_paths = preferred_paths or set()
+        for candidate in candidates:
+            if (
+                candidate.path not in requested_paths
+                or candidate.path in preferred_page_paths
+            ):
+                continue
+            preferred.append(candidate)
+            preferred_page_paths.add(candidate.path)
+        remaining = [
+            item for item in candidates if item.path not in preferred_page_paths
+        ]
+        overview = [item for item in remaining if item.page_type == "overview"]
+        others = [item for item in remaining if item.page_type != "overview"]
         # 先保证 Overview 和其他类型各有一次机会，再按原始稳定顺序补齐。
         first_by_type: list[WikiCandidate] = []
         known_types: set[str] = set()
@@ -124,7 +144,15 @@ class WikiContextRetriever:
             if candidate.page_type not in known_types:
                 first_by_type.append(candidate)
                 known_types.add(candidate.page_type)
-        ordered = [*first_by_type, *[item for item in [*overview, *others] if item not in first_by_type]]
+        ordered = [
+            *preferred,
+            *first_by_type,
+            *[
+                item
+                for item in [*overview, *others]
+                if item not in first_by_type
+            ],
+        ]
         for candidate in ordered:
             tokens = TokenEstimator.estimate(candidate.rendered)
             if tokens > SECTION_MAX_TOKENS:
@@ -144,6 +172,12 @@ class WikiContextRetriever:
         if not selected:
             return "(no relevant existing Wiki evidence was retrieved)"
         return "\n\n---\n\n".join(item.rendered for item in selected)
+
+    @classmethod
+    def score_candidate(cls, query: str, candidate: WikiCandidate) -> int:
+        """使用与快照检索相同的规则重新评估一个已选候选。"""
+        terms, links = cls._query_terms(query)
+        return cls._score(candidate.heading, candidate.content, terms, links)
 
     @staticmethod
     def _query_terms(source_content: str) -> tuple[set[str], set[str]]:
@@ -174,3 +208,12 @@ class WikiContextRetriever:
         normalized_heading = heading.casefold()
         score += 10 * sum(link == normalized_heading for link in links)
         return score
+
+    @staticmethod
+    def _page_type(path: str) -> str:
+        parts = PurePosixPath(path).parts
+        if parts[-1:] == ("overview.md",):
+            return "overview"
+        if len(parts) >= 3 and parts[0] == "wiki":
+            return parts[1]
+        return "unknown"

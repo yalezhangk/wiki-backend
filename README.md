@@ -35,7 +35,7 @@
 
 - 无状态知识库问答，并返回结构化引用。
 - MySQL 持久化聊天、消息及回答。
-- 文档和 Markdown 入库、任务进度及失败诊断。
+- 文档和 Markdown 入库；超出直通阈值时自动进行结构化分块、文档级 Reduce 和逐页生成。
 - 将回答综合为 Wiki Markdown，并记录 synthesis 状态。
 - Quartz 构建与发布状态管理。
 - 知识库维护任务、概览和质量报告。
@@ -64,6 +64,9 @@
 - chat、message 和 ingest job 的外部 ID 为数据库数值主键；跨阶段关联使用独立 workflow UUID。
 - API 时间字段使用带 `+08:00` 的北京时间。
 - Ingest 会校验文件名、类型、大小和落盘路径；任务详情包含当前阶段和进度。
+- 不超过 24,576 tokens 的来源使用完整来源快速路径；更大的来源进入串行大文档管线，全部页面
+  组装并校验成功后才写 Wiki。该管线已通过 fake LLM 回归以及真实 DGX
+  `qwen3.8:27b` / 49,655-token RM6 文档的 MySQL、Wiki 和 Quartz 发布验证。
 - 新建 Ingest 任务以文件主名的 NFKC、空白归一化和大小写折叠结果进行全局去重；manual 与 scheduled 同名会返回 `409 Conflict`，失败任务会释放名称。
 - 新 manual 文件保存到 `raw/uploads/manual/`；新 scheduled Markdown 保存到 `raw/uploads/scheduled/`。scheduled 必须提交 `source_url`，manual 不得提交该字段。
 - Source 页面由后端在写入前确定来源：manual 写 `source_file: raw/uploads/manual/<原文件>`，scheduled 只写 `source_url: "https://..."`；已存在的 Source slug 不会被覆盖。
@@ -97,6 +100,11 @@ Copy-Item .env.example .env
 | `WIKI_BACKEND_LLM_PROVIDER` | 默认模型提供方，供 Query 和维护等内部任务使用 |
 | `WIKI_BACKEND_INGEST_PROVIDER` / `WIKI_BACKEND_INGEST_MODEL` | Ingest 专用服务端白名单模型，默认 DeepSeek V4 Pro；不由浏览器请求决定 |
 | `WIKI_BACKEND_INGEST_LLM_MAX_TOKENS` | Ingest 单次完整 JSON 响应的最大输出 token，默认 8192 |
+| `WIKI_BACKEND_INGEST_CHUNK_MAX_TOKENS` | 大文档单个 Chunk Evidence Extraction 最大输出 token，默认 4096 |
+| `WIKI_BACKEND_INGEST_SECTION_SYNTHESIS_MAX_TOKENS` | 大文档层级归并单组 Section Synthesis 最大输出 token，默认 4096 |
+| `WIKI_BACKEND_INGEST_DOCUMENT_REDUCE_MAX_TOKENS` | 大文档 Document Reduce 最大输出 token，默认 5120 |
+| `WIKI_BACKEND_INGEST_SOURCE_PAGE_MAX_TOKENS` | 大文档 Source 页面生成最大输出 token，默认 8192 |
+| `WIKI_BACKEND_INGEST_KNOWLEDGE_PAGE_MAX_TOKENS` | 大文档单个 Entity/Concept create、patch 或 skip 调用最大输出 token，默认 4096 |
 | `WIKI_BACKEND_INGEST_REASONING_EFFORT` | 兼容配置项；Ingest 的 DeepSeek 与本地 `qwen3.8:27b` 均固定为 `none`，以确保完整 JSON 输出 |
 | `WIKI_BACKEND_DEEPSEEK_API_KEY` | DeepSeek API 密钥 |
 | `WIKI_BACKEND_DEEPSEEK_API_BASE` | DeepSeek API 地址 |

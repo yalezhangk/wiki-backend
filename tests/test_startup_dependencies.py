@@ -11,6 +11,9 @@ from app.config import PROJECT_ROOT, Settings
 from app.main import create_app
 from app.schemas.query import CitationResponse, QueryResult
 from app.services.ingest_service import IngestService, call_llm_profile
+from app.services.ingest_large_document_orchestrator import (
+    LargeDocumentIngestOrchestrator,
+)
 from app.services.query_service import QueryService, QueryServiceError
 
 
@@ -84,6 +87,52 @@ class StartupDependencyTests(unittest.TestCase):
             settings = Settings(_env_file=None)
 
         self.assertEqual(settings.ingest_llm_max_tokens, 12288)
+
+    def test_ingest_stage_output_budgets_use_environment_values(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "WIKI_BACKEND_INGEST_LLM_MAX_TOKENS": "7000",
+                "WIKI_BACKEND_INGEST_CHUNK_MAX_TOKENS": "2100",
+                "WIKI_BACKEND_INGEST_SECTION_SYNTHESIS_MAX_TOKENS": "2200",
+                "WIKI_BACKEND_INGEST_DOCUMENT_REDUCE_MAX_TOKENS": "5300",
+                "WIKI_BACKEND_INGEST_SOURCE_PAGE_MAX_TOKENS": "6800",
+                "WIKI_BACKEND_INGEST_KNOWLEDGE_PAGE_MAX_TOKENS": "3300",
+            },
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+
+        self.assertEqual(
+            settings.ingest_stage_output_budgets.model_dump(),
+            {
+                "chunk_extraction": 2100,
+                "section_synthesis": 2200,
+                "document_reduce": 5300,
+                "source_page": 6800,
+                "knowledge_page": 3300,
+            },
+        )
+
+    def test_ingest_stage_output_budgets_are_capped_by_global_limit(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "WIKI_BACKEND_INGEST_LLM_MAX_TOKENS": "3000",
+                "WIKI_BACKEND_INGEST_CHUNK_MAX_TOKENS": "4000",
+                "WIKI_BACKEND_INGEST_SECTION_SYNTHESIS_MAX_TOKENS": "4100",
+                "WIKI_BACKEND_INGEST_DOCUMENT_REDUCE_MAX_TOKENS": "5000",
+                "WIKI_BACKEND_INGEST_SOURCE_PAGE_MAX_TOKENS": "8000",
+                "WIKI_BACKEND_INGEST_KNOWLEDGE_PAGE_MAX_TOKENS": "4200",
+            },
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+
+        self.assertEqual(
+            set(settings.ingest_stage_output_budgets.model_dump().values()),
+            {3000},
+        )
 
     def test_marker_ocr_is_disabled_by_default_and_can_be_enabled(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
@@ -194,6 +243,19 @@ class StartupDependencyTests(unittest.TestCase):
             "quality",
         ):
             self.assertIn(f"`{group}`", description)
+
+    def test_default_application_wires_large_document_orchestrator(self) -> None:
+        with TestClient(create_app(initialize_storage=False)) as client:
+            ingest_service = client.app.state.ingest_service
+
+        self.assertIsInstance(
+            ingest_service._large_document_ingestor,
+            LargeDocumentIngestOrchestrator,
+        )
+        self.assertIs(
+            ingest_service._large_document_ingestor._wiki_lock,
+            ingest_service._wiki_lock,
+        )
 
     def test_query_contract_returns_answer_and_wiki_identifiers(self) -> None:
         client = TestClient(

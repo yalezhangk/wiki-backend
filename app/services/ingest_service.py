@@ -47,11 +47,21 @@ from app.services.ingest_context import (
     WikiSnapshot,
 )
 from app.services.ingest_document_name import normalize_document_name
+from app.services.ingest_large_document_status import (
+    LargeDocumentLLMCaller,
+    LargeDocumentProgressCallback,
+    LargeDocumentProgressEvent,
+    LargeDocumentStageError,
+)
+from app.services.ingest_result_assembly import LargeDocumentResultAssembly
 from app.services.wiki_page_policy import iter_knowledge_pages
 from app.storage.mysql import DuplicateDocumentNameError
 from app.time_utils import beijing_now
 
 LOGGER = logging.getLogger(__name__)
+_WIKILINK_TARGET_PATTERN = re.compile(
+    r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]"
+)
 
 CONVERTIBLE_EXTENSIONS = {
     ".pdf",
@@ -123,6 +133,24 @@ MARKER_OCR_ARGUMENTS = (
     "--disable_multiprocessing",
     "--disable_tqdm",
 )
+
+
+IngestGenerationResult = LargeDocumentResultAssembly
+
+
+class LargeDocumentIngestor(Protocol):
+    """分阶段大文档实现使用的内部接缝。"""
+
+    def ingest(
+        self,
+        *,
+        job: IngestJobResponse,
+        source: Path,
+        source_content: str,
+        ingest_profile: IngestModelProfile,
+        call_llm: LargeDocumentLLMCaller,
+        progress_callback: LargeDocumentProgressCallback,
+    ) -> IngestGenerationResult: ...
 
 
 class IngestServiceError(RuntimeError):
@@ -263,6 +291,7 @@ class IngestService:
         agent_root: Path,
         start_worker: bool = True,
         publish_service: PublishService | None = None,
+        large_document_ingestor: LargeDocumentIngestor | None = None,
         wiki_lock: Any | None = None,
         max_upload_bytes: int = settings.ingest_max_upload_bytes,
         ingest_llm_max_tokens: int = settings.ingest_llm_max_tokens,
@@ -277,6 +306,7 @@ class IngestService:
         self._max_upload_bytes = max_upload_bytes
         self._ingest_llm_max_tokens = ingest_llm_max_tokens
         self._publish_service = publish_service
+        self._large_document_ingestor = large_document_ingestor
         self._wiki_lock = wiki_lock or threading.RLock()
         self._queue: Queue[int] = Queue()
         self._worker: threading.Thread | None = None
@@ -379,14 +409,38 @@ class IngestService:
                     self._publish_service.queue_change(source_kind="ingest", source_id=str(job_id))
                 except Exception:
                     LOGGER.exception("Failed to queue Quartz publish after ingest job_id=%s", job_id)
+        except IngestLLMResponseError as exc:
+            LOGGER.error(
+                "Ingest job failed with safe LLM error job_id=%s category=%s",
+                job_id,
+                exc.category,
+            )
+            self._record_failed_job(
+                job_id=job_id,
+                source_path=job.source_path,
+                error=str(exc),
+            )
         except Exception as exc:
             LOGGER.exception("Ingest job failed job_id=%s", job_id)
-            self._storage.mark_ingest_job_failed(
+            self._record_failed_job(
                 job_id=job_id,
+                source_path=job.source_path,
                 error=str(exc),
-                finished_at=self._beijing_now(),
             )
-            self._remove_failed_upload(source_path=job.source_path, job_id=job_id)
+
+    def _record_failed_job(
+        self,
+        *,
+        job_id: int,
+        source_path: str,
+        error: str,
+    ) -> None:
+        self._storage.mark_ingest_job_failed(
+            job_id=job_id,
+            error=error,
+            finished_at=self._beijing_now(),
+        )
+        self._remove_failed_upload(source_path=source_path, job_id=job_id)
 
     def _remove_failed_upload(self, *, source_path: str, job_id: int) -> None:
         upload_dir = self._upload_dir.resolve()
@@ -464,6 +518,113 @@ class IngestService:
                 ) from ocr_error
         self._update_progress(job_id, "extracting", 35)
         ingest_profile = self._resolve_ingest_profile(job.ingest_model)
+        if TokenEstimator.estimate(source_content) > SMALL_SOURCE_MAX_TOKENS:
+            if self._large_document_ingestor is None:
+                self._assert_source_is_direct_ingestable(source_content)
+                raise RuntimeError("unreachable large-document routing state")
+            try:
+                generated = self._large_document_ingestor.ingest(
+                    job=job,
+                    source=source,
+                    source_content=source_content,
+                    ingest_profile=ingest_profile,
+                    call_llm=lambda prompt, *, max_tokens: self._call_llm_with_retry(
+                        prompt,
+                        ingest_profile=ingest_profile,
+                        max_tokens=max_tokens,
+                        translate_truncation=False,
+                    ),
+                    progress_callback=lambda event: self._report_large_document_progress(
+                        job_id,
+                        event,
+                    ),
+                )
+            except LargeDocumentStageError as exc:
+                LOGGER.warning(
+                    "Large-document stage failed job_id=%s phase=%s category=%s "
+                    "item_id=%s",
+                    job_id,
+                    exc.phase,
+                    exc.category,
+                    exc.item_id,
+                )
+                raise IngestLLMResponseError(
+                    exc.category,
+                    exc.user_message,
+                ) from exc
+        else:
+            generated = self._generate_direct_ingest_result(
+                source=source,
+                source_path=source_path,
+                source_content=source_content,
+                job_id=job_id,
+                ingest_profile=ingest_profile,
+            )
+
+        data = generated.data
+        selected_page_hashes = generated.selected_page_hashes
+
+        self._update_progress(job_id, "writing_wiki", 65)
+        with self._wiki_lock:
+            created_pages, updated_pages, changed_knowledge_pages = self._write_ingest_result(
+                job,
+                data,
+                selected_page_hashes=selected_page_hashes,
+            )
+        self._update_progress(job_id, "validating", 85)
+        validation = self._validate_ingest(changed_knowledge_pages)
+
+        return {
+            "created_pages": created_pages,
+            "updated_pages": updated_pages,
+            "contradictions": data.contradictions,
+            "validation": validation,
+        }
+
+    def _report_large_document_progress(
+        self,
+        job_id: int,
+        event: LargeDocumentProgressEvent,
+    ) -> None:
+        """沿用 extracting stage，且拒绝乱序事件造成进度回退。"""
+        progress_percent = event.progress_percent
+        current_percent = self.get_job(job_id).progress_percent
+        if progress_percent < current_percent:
+            LOGGER.warning(
+                "Ignored regressive large-document progress job_id=%s phase=%s "
+                "completed=%s total=%s item_id=%s current=%s requested=%s",
+                job_id,
+                event.phase,
+                event.completed,
+                event.total,
+                event.item_id,
+                current_percent,
+                progress_percent,
+            )
+            return
+        LOGGER.info(
+            "Large-document progress job_id=%s phase=%s completed=%s total=%s "
+            "item_id=%s progress_percent=%s",
+            job_id,
+            event.phase,
+            event.completed,
+            event.total,
+            event.item_id,
+            progress_percent,
+        )
+        if progress_percent > current_percent:
+            self._update_progress(job_id, "extracting", progress_percent)
+
+    def _generate_direct_ingest_result(
+        self,
+        *,
+        source: Path,
+        source_path: Path,
+        source_content: str,
+        job_id: int,
+        ingest_profile: IngestModelProfile,
+    ) -> IngestGenerationResult:
+        """运行现有单次 Prompt 路径且不改变结果契约。"""
         self._assert_source_is_direct_ingestable(source_content)
         prompt, selected_page_hashes = self._build_prompt_with_snapshot(
             source=source,
@@ -519,22 +680,10 @@ class IngestService:
             )
             raise IngestLLMSchemaError() from exc
 
-        self._update_progress(job_id, "writing_wiki", 65)
-        with self._wiki_lock:
-            created_pages, updated_pages, changed_knowledge_pages = self._write_ingest_result(
-                job,
-                data,
-                selected_page_hashes=selected_page_hashes,
-            )
-        self._update_progress(job_id, "validating", 85)
-        validation = self._validate_ingest(changed_knowledge_pages)
-
-        return {
-            "created_pages": created_pages,
-            "updated_pages": updated_pages,
-            "contradictions": data.contradictions,
-            "validation": validation,
-        }
+        return IngestGenerationResult(
+            data=data,
+            selected_page_hashes=selected_page_hashes,
+        )
 
     @staticmethod
     def _assert_source_content_quality(*, source_content: str, source_suffix: str) -> None:
@@ -1163,10 +1312,15 @@ class IngestService:
             if not page_path.exists():
                 continue
             content = self._read_text(page_path)
-            for link in re.findall(r"\[\[([^\]]+)\]\]", content):
-                link_stem = Path(link).stem.lower() if "/" in link else link.lower()
+            for link in _WIKILINK_TARGET_PATTERN.findall(content):
+                normalized_link = link.strip()
+                link_stem = (
+                    Path(normalized_link).stem.lower()
+                    if "/" in normalized_link
+                    else normalized_link.lower()
+                )
                 if link_stem not in existing_pages:
-                    broken_links.append((page, link))
+                    broken_links.append((page, normalized_link))
             stem = page_path.stem.lower()
             if stem not in index_content and page not in {"log.md", "overview.md"}:
                 unindexed.append(page)
@@ -1210,19 +1364,39 @@ class IngestService:
         prompt: str,
         *,
         ingest_profile: IngestModelProfile | None = None,
+        max_tokens: int | None = None,
+        translate_truncation: bool = True,
     ) -> str:
         selected_profile = ingest_profile or self._resolve_ingest_profile()
-        self._assert_prompt_fits_model_context(prompt=prompt, ingest_profile=selected_profile)
+        requested_max_tokens = (
+            self._ingest_llm_max_tokens if max_tokens is None else max_tokens
+        )
+        if requested_max_tokens <= 0:
+            raise ValueError("max_tokens must be positive")
+        effective_max_tokens = min(
+            requested_max_tokens,
+            self._ingest_llm_max_tokens,
+        )
+        self._assert_prompt_fits_model_context(
+            prompt=prompt,
+            ingest_profile=selected_profile,
+            max_output_tokens=effective_max_tokens,
+        )
         for attempt in range(2):
             try:
                 if self._call_llm_main is not None:
-                    return self._call_llm_main(prompt, max_tokens=self._ingest_llm_max_tokens)
+                    return self._call_llm_main(
+                        prompt,
+                        max_tokens=effective_max_tokens,
+                    )
                 return call_llm_profile(
                     prompt,
                     selected_profile.llm_profile,
-                    max_tokens=self._ingest_llm_max_tokens,
+                    max_tokens=effective_max_tokens,
                 )
             except LLMResponseTruncatedError as exc:
+                if not translate_truncation:
+                    raise
                 raise IngestLLMResponseTruncatedError(
                     response_content=exc.response_content,
                 ) from exc
@@ -1253,12 +1427,18 @@ class IngestService:
         *,
         prompt: str,
         ingest_profile: IngestModelProfile,
+        max_output_tokens: int | None = None,
     ) -> None:
         capabilities = ingest_profile.capabilities
         input_tokens = TokenEstimator.estimate(prompt)
+        effective_max_output_tokens = (
+            self._ingest_llm_max_tokens
+            if max_output_tokens is None
+            else max_output_tokens
+        )
         budget = PromptBudget(
             max_input_tokens=capabilities.max_input_tokens,
-            max_output_tokens=self._ingest_llm_max_tokens,
+            max_output_tokens=effective_max_output_tokens,
             safety_margin_tokens=capabilities.context_safety_margin_tokens,
             context_window_tokens=capabilities.context_window_tokens,
         )
@@ -1273,7 +1453,7 @@ class IngestService:
             ingest_profile.model_identifier,
             input_tokens,
             capabilities.max_input_tokens,
-            self._ingest_llm_max_tokens,
+            effective_max_output_tokens,
             capabilities.context_safety_margin_tokens,
             capabilities.context_window_tokens,
         )

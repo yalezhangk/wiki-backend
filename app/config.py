@@ -3,12 +3,29 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.schemas.model_profile import ModelProfileId
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+INGEST_CHUNK_DEFAULT_MAX_TOKENS = 4_096
+INGEST_SECTION_SYNTHESIS_DEFAULT_MAX_TOKENS = 4_096
+INGEST_DOCUMENT_REDUCE_DEFAULT_MAX_TOKENS = 5_120
+INGEST_SOURCE_PAGE_DEFAULT_MAX_TOKENS = 8_192
+INGEST_KNOWLEDGE_PAGE_DEFAULT_MAX_TOKENS = 4_096
+
+
+class IngestStageOutputBudgets(BaseModel):
+    """大文档各模型阶段最终可使用的最大输出 token。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    chunk_extraction: int = Field(gt=0)
+    section_synthesis: int = Field(gt=0)
+    document_reduce: int = Field(gt=0)
+    source_page: int = Field(gt=0)
+    knowledge_page: int = Field(gt=0)
 
 
 class Settings(BaseSettings):
@@ -55,6 +72,31 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias="WIKI_BACKEND_INGEST_LLM_MAX_TOKENS",
     )
+    ingest_chunk_max_tokens: int = Field(
+        default=INGEST_CHUNK_DEFAULT_MAX_TOKENS,
+        gt=0,
+        validation_alias="WIKI_BACKEND_INGEST_CHUNK_MAX_TOKENS",
+    )
+    ingest_section_synthesis_max_tokens: int = Field(
+        default=INGEST_SECTION_SYNTHESIS_DEFAULT_MAX_TOKENS,
+        gt=0,
+        validation_alias="WIKI_BACKEND_INGEST_SECTION_SYNTHESIS_MAX_TOKENS",
+    )
+    ingest_document_reduce_max_tokens: int = Field(
+        default=INGEST_DOCUMENT_REDUCE_DEFAULT_MAX_TOKENS,
+        gt=0,
+        validation_alias="WIKI_BACKEND_INGEST_DOCUMENT_REDUCE_MAX_TOKENS",
+    )
+    ingest_source_page_max_tokens: int = Field(
+        default=INGEST_SOURCE_PAGE_DEFAULT_MAX_TOKENS,
+        gt=0,
+        validation_alias="WIKI_BACKEND_INGEST_SOURCE_PAGE_MAX_TOKENS",
+    )
+    ingest_knowledge_page_max_tokens: int = Field(
+        default=INGEST_KNOWLEDGE_PAGE_DEFAULT_MAX_TOKENS,
+        gt=0,
+        validation_alias="WIKI_BACKEND_INGEST_KNOWLEDGE_PAGE_MAX_TOKENS",
+    )
     ingest_provider: str = Field(
         default="deepseek",
         validation_alias="WIKI_BACKEND_INGEST_PROVIDER",
@@ -71,6 +113,27 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="WIKI_BACKEND_INGEST_ENABLE_MARKER_OCR",
     )
+
+    @property
+    def ingest_stage_output_budgets(self) -> IngestStageOutputBudgets:
+        """返回不超过全局 Ingest 输出上限的各阶段预算。"""
+        global_limit = self.ingest_llm_max_tokens
+        return IngestStageOutputBudgets(
+            chunk_extraction=min(self.ingest_chunk_max_tokens, global_limit),
+            section_synthesis=min(
+                self.ingest_section_synthesis_max_tokens,
+                global_limit,
+            ),
+            document_reduce=min(
+                self.ingest_document_reduce_max_tokens,
+                global_limit,
+            ),
+            source_page=min(self.ingest_source_page_max_tokens, global_limit),
+            knowledge_page=min(
+                self.ingest_knowledge_page_max_tokens,
+                global_limit,
+            ),
+        )
     scheduled_ingest_root: Path | None = Field(
         default=None,
         validation_alias="WIKI_BACKEND_SCHEDULED_INGEST_ROOT",

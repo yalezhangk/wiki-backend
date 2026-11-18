@@ -284,6 +284,16 @@ class ChunkEvidenceExtractor:
                 chunk.chunk_id,
                 "证据修复响应不是有效 JSON 对象",
             ) from exc
+        for field_name in ("entities", "concepts", "internal_conflicts"):
+            values = parsed.get(field_name)
+            if isinstance(values, list) and len(values) > 20:
+                LOGGER.warning(
+                    "Truncated oversized chunk repair list chunk_id=%s field=%s count=%s",
+                    chunk.chunk_id,
+                    field_name,
+                    len(values),
+                )
+                parsed[field_name] = values[:20]
         try:
             repaired = IngestChunkExtraction.model_validate(parsed)
         except ValidationError as exc:
@@ -485,7 +495,19 @@ class ChunkEvidenceExtractor:
         try:
             parsed = json.loads(sanitized)
         except json.JSONDecodeError as exc:
-            raise _InvalidChunkJSON() from exc
+            if exc.msg != "Invalid \\escape":
+                raise _InvalidChunkJSON() from exc
+            escaped_tex = re.sub(
+                r"(?<!\\)\\(?=[A-Za-z]{2,})",
+                r"\\\\",
+                sanitized,
+            )
+            if escaped_tex == sanitized:
+                raise _InvalidChunkJSON() from exc
+            try:
+                parsed = json.loads(escaped_tex)
+            except json.JSONDecodeError as repair_error:
+                raise _InvalidChunkJSON() from repair_error
         if not isinstance(parsed, dict):
             raise _InvalidChunkJSON()
         return parsed

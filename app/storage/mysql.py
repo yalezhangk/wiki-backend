@@ -723,7 +723,7 @@ class MySQLStorage:
         error: str | None,
         finished_at: datetime,
     ) -> None:
-        if state not in {"succeeded", "failed"}:
+        if state not in {"succeeded", "failed", "skipped"}:
             raise StorageError(f"Invalid scheduled ingest terminal state: {state}")
         self._execute_update(
             """

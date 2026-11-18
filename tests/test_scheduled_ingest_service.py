@@ -5,6 +5,7 @@ import unittest
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from app.schemas.ingest import IngestJobResponse, IngestValidation
 from app.services.scheduled_ingest_service import (
@@ -13,7 +14,7 @@ from app.services.scheduled_ingest_service import (
     ScheduledIngestError,
     ScheduledIngestService,
 )
-from app.storage.mysql import ScheduledIngestSource
+from app.storage.mysql import MySQLStorage, ScheduledIngestSource
 
 
 class FakeScheduledStorage:
@@ -313,12 +314,41 @@ class ScheduledIngestServiceTests(unittest.TestCase):
 
     def test_duplicate_api_response_is_recorded_as_skip(self) -> None:
         (self.root / "duplicate.md").write_text("# duplicate", encoding="utf-8")
-        api_client = FakeScheduledApiClient({"duplicate.md": ["duplicate"]})
+        next_directory = self.root / "next"
+        next_directory.mkdir()
+        (next_directory / "readme.txt").write_text(
+            "Source URL: https://example.com/next", encoding="utf-8"
+        )
+        (next_directory / "next.md").write_text("# next", encoding="utf-8")
+        api_client = FakeScheduledApiClient(
+            {"duplicate.md": ["duplicate"], "next.md": ["succeeded"]}
+        )
 
         summary = self._service(api_client).run()
 
         self.assertEqual(summary.skipped_count, 1)
+        self.assertEqual(summary.succeeded_count, 1)
         self.assertEqual(self.storage.completed[1][0], "skipped")
+        self.assertEqual(api_client.uploads, ["duplicate.md", "next.md"])
+
+    def test_mysql_storage_accepts_skipped_terminal_state(self) -> None:
+        storage = MySQLStorage("host", 3306, "user", "password", "database")
+        finished_at = datetime(2026, 8, 3, 3, 0, 0)
+
+        with patch.object(storage, "_execute_update") as execute_update:
+            storage.complete_scheduled_ingest_source(
+                source_id=7,
+                state="skipped",
+                error="文档名称已存在，跳过重复定时入库",
+                finished_at=finished_at,
+            )
+
+        query, params = execute_update.call_args.args
+        self.assertIn("WHERE id = %s AND state = 'processing'", query)
+        self.assertEqual(
+            params,
+            ("skipped", "文档名称已存在，跳过重复定时入库", finished_at, 7),
+        )
 
     def test_loopback_payload_includes_source_url(self) -> None:
         source = self.root / "source.md"

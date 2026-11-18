@@ -20,7 +20,7 @@ class IngestChunkEvidence(BaseModel):
 
     evidence_id: str = Field(min_length=1, max_length=200)
     statement: str = Field(min_length=1, max_length=300)
-    evidence_text: str = Field(min_length=1, max_length=200)
+    evidence_text: str = Field(min_length=1, max_length=500)
     source_lines: str = Field(pattern=r"^\d+(?:-\d+)?$")
     category: IngestEvidenceCategory
 

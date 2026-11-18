@@ -281,6 +281,75 @@ class ChunkEvidenceExtractorTests(unittest.TestCase):
         self.assertEqual(len(caller.calls), 2)
         self.assertIn("chunk_schema_invalid", caller.calls[1][0])
 
+    def test_grounding_repair_accepts_long_formula_excerpt(self) -> None:
+        formula = "X_{A}=0.1826+0.115+0.1826*0.115/0.3122;" * 6
+        chunk = make_chunk(
+            "chunk-0001-formula",
+            start_line=1,
+            primary_text=f"{formula}\n",
+        )
+        repaired = successful_payload(
+            chunk,
+            evidence=[
+                {
+                    "evidence_id": f"{chunk.chunk_id}:e001",
+                    "statement": "公式给出 X_A 的计算过程。",
+                    "evidence_text": formula,
+                    "source_lines": "1",
+                    "category": "specification",
+                }
+            ],
+        )
+        caller = FakeChunkLLMCaller([json.dumps({"chunk_id": chunk.chunk_id}), repaired])
+        extractor = ChunkEvidenceExtractor(ingest_profile=make_profile(), call_llm=caller)
+
+        result = extractor.extract((chunk,), today=date(2026, 10, 19))[0]
+
+        self.assertEqual(result.evidence[0].evidence_text, formula)
+
+    def test_repair_limits_auxiliary_lists_to_contract_size(self) -> None:
+        chunk = make_chunk("chunk-0001-list", start_line=1, primary_text="正文。\n")
+        oversized = json.loads(successful_payload(chunk))
+        oversized["entities"] = [f"实体{number}" for number in range(21)]
+        caller = FakeChunkLLMCaller(
+            [json.dumps(oversized, ensure_ascii=False)] * 2
+        )
+        extractor = ChunkEvidenceExtractor(ingest_profile=make_profile(), call_llm=caller)
+
+        result = extractor.extract((chunk,), today=date(2026, 10, 19))[0]
+
+        self.assertEqual(len(result.entities), 20)
+
+    def test_formula_backslashes_in_model_json_are_recovered(self) -> None:
+        formula = r"I_{K2}^{\prime\prime} = \frac{1}{2}"
+        chunk = make_chunk(
+            "chunk-0001-tex",
+            start_line=1,
+            primary_text=f"{formula}\n",
+        )
+        payload = successful_payload(
+            chunk,
+            evidence=[
+                {
+                    "evidence_id": f"{chunk.chunk_id}:e001",
+                    "statement": "K2 点电流公式",
+                    "evidence_text": formula,
+                    "source_lines": "1",
+                    "category": "specification",
+                }
+            ],
+        )
+        invalid_json = payload.replace(r"\\prime", r"\prime").replace(
+            r"\\frac", r"\frac"
+        )
+        caller = FakeChunkLLMCaller([invalid_json])
+        extractor = ChunkEvidenceExtractor(ingest_profile=make_profile(), call_llm=caller)
+
+        result = extractor.extract((chunk,), today=date(2026, 10, 19))[0]
+
+        self.assertEqual(result.evidence[0].evidence_text, formula)
+        self.assertEqual(len(caller.calls), 1)
+
     def test_model_failure_stops_before_later_chunks(self) -> None:
         first = make_chunk("chunk-0001-failed", start_line=1, primary_text="正文一。\n")
         second = make_chunk("chunk-0002-unused", start_line=2, primary_text="正文二。\n")

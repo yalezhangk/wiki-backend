@@ -67,6 +67,7 @@
 - 不超过 24,576 tokens 的来源使用完整来源快速路径；更大的来源进入串行大文档管线，全部页面
   组装并校验成功后才写 Wiki。该管线已通过 fake LLM 回归以及真实 DGX
   `qwen3.8:27b` / 49,655-token RM6 文档的 MySQL、Wiki 和 Quartz 发布验证。
+- 完整来源快速路径的模型响应截断，或生成了无法应用的既有页面 patch 时，会重新走分阶段管线；后者在写 Wiki 前检查，因此不会留下部分页面。
 - 新建 Ingest 任务以文件主名的 NFKC、空白归一化和大小写折叠结果进行全局去重；manual 与 scheduled 同名会返回 `409 Conflict`，失败任务会释放名称。
 - 新 manual 文件保存到 `raw/uploads/manual/`；新 scheduled Markdown 保存到 `raw/uploads/scheduled/`。scheduled 必须提交 `source_url`，manual 不得提交该字段。
 - Source 页面由后端在写入前确定来源：manual 写 `source_file: raw/uploads/manual/<原文件>`，scheduled 只写 `source_url: "https://..."`；已存在的 Source slug 不会被覆盖。
@@ -337,6 +338,7 @@ ssh -N -L 18081:127.0.0.1:8081 <DGX_USER>@<DGX_HOST>
 ## 每日增量 Markdown 入库
 
 定时入库通过独立 systemd timer 调用后端脚本，只扫描配置范围内的新 Markdown，并会写真实 Wiki、MySQL、发布状态且可能调用模型。部署前必须先执行 dry-run/validate，确认目录、时区、锁和 `.env`。
+已存在的同名文档会记为 `skipped`，并继续扫描后续文件；缺少 `readme.txt` 来源信息或同目录存在多个 Markdown 会计入失败，使本次命令以状态码 `1` 退出。
 
 部署模板见 [systemd service 示例](docs/wiki-backend-scheduled-ingest.service.example) 和 [systemd timer 示例](docs/wiki-backend-scheduled-ingest.timer.example)。Ingest 的阶段、进度、上传和 OCR 细节见 [Ingest 说明](docs/ingest.md) 与 [Ingest 流程](docs/ingest-flow.md)。
 

@@ -14,7 +14,12 @@ from fastapi import UploadFile
 from pydantic import ValidationError
 
 from app.llm_config import IngestModelProfile, LLMConfigError, LLMResponseTruncatedError
-from app.schemas.ingest import IngestJobResponse, IngestLLMResult, IngestValidation
+from app.schemas.ingest import (
+    IngestJobResponse,
+    IngestLLMResult,
+    IngestPagePatch,
+    IngestValidation,
+)
 from app.services.ingest_service import (
     IngestConflictError,
     IngestContentQualityError,
@@ -1117,6 +1122,69 @@ class IngestServiceTests(unittest.TestCase):
                 ("validating", 85),
             ],
         )
+
+    def test_truncated_direct_result_falls_back_to_staged_ingest(self) -> None:
+        large_document_ingestor = FakeLargeDocumentIngestor(
+            result=self._large_document_result()
+        )
+        service = IngestService(
+            storage=self.storage,
+            agent_root=self.agent_root,
+            start_worker=False,
+            large_document_ingestor=large_document_ingestor,
+        )
+        job = self._create_stored_markdown_job(
+            filename="large-report.md",
+            source_content="分析设备故障根因。" * 100,
+        )
+        with patch.object(
+            service,
+            "_generate_direct_ingest_result",
+            side_effect=IngestLLMResponseTruncatedError(),
+        ):
+            service._run_job(job.job_id)
+
+        self.assertEqual(len(large_document_ingestor.calls), 1)
+        self.assertEqual(self.storage.jobs[job.job_id].status, "succeeded")
+
+    def test_invalid_direct_patch_falls_back_to_staged_ingest(self) -> None:
+        valid_result = self._large_document_result()
+        invalid_data = valid_result.data.model_copy(
+            update={
+                "entity_patches": [
+                    IngestPagePatch(
+                        path="entities/missing.md",
+                        base_hash="0" * 64,
+                        operation="append_section",
+                        heading="来源补充",
+                        content="设备说明",
+                    )
+                ]
+            }
+        )
+        large_document_ingestor = FakeLargeDocumentIngestor(result=valid_result)
+        service = IngestService(
+            storage=self.storage,
+            agent_root=self.agent_root,
+            start_worker=False,
+            large_document_ingestor=large_document_ingestor,
+        )
+        job = self._create_stored_markdown_job(
+            filename="large-report.md",
+            source_content="存量设备改造业务机会。" * 100,
+        )
+        with patch.object(
+            service,
+            "_generate_direct_ingest_result",
+            return_value=IngestGenerationResult(
+                data=invalid_data,
+                selected_page_hashes={},
+            ),
+        ):
+            service._run_job(job.job_id)
+
+        self.assertEqual(len(large_document_ingestor.calls), 1)
+        self.assertEqual(self.storage.jobs[job.job_id].status, "succeeded")
 
     def test_large_document_ingestor_failure_does_not_write_or_publish(self) -> None:
         large_document_ingestor = FakeLargeDocumentIngestor(

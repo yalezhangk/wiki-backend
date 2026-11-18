@@ -522,44 +522,62 @@ class IngestService:
             if self._large_document_ingestor is None:
                 self._assert_source_is_direct_ingestable(source_content)
                 raise RuntimeError("unreachable large-document routing state")
+            generated = self._generate_staged_ingest_result(
+                job=job,
+                source=source,
+                source_content=source_content,
+                ingest_profile=ingest_profile,
+            )
+        else:
             try:
-                generated = self._large_document_ingestor.ingest(
+                generated = self._generate_direct_ingest_result(
+                    source=source,
+                    source_path=source_path,
+                    source_content=source_content,
+                    job_id=job_id,
+                    ingest_profile=ingest_profile,
+                )
+            except IngestLLMResponseTruncatedError:
+                if self._large_document_ingestor is None:
+                    raise
+                LOGGER.warning(
+                    "Direct ingest response truncated; retrying staged ingest job_id=%s",
+                    job_id,
+                )
+                generated = self._generate_staged_ingest_result(
                     job=job,
                     source=source,
                     source_content=source_content,
                     ingest_profile=ingest_profile,
-                    call_llm=lambda prompt, *, max_tokens: self._call_llm_with_retry(
-                        prompt,
-                        ingest_profile=ingest_profile,
-                        max_tokens=max_tokens,
-                        translate_truncation=False,
-                    ),
-                    progress_callback=lambda event: self._report_large_document_progress(
-                        job_id,
-                        event,
-                    ),
                 )
-            except LargeDocumentStageError as exc:
-                LOGGER.warning(
-                    "Large-document stage failed job_id=%s phase=%s category=%s "
-                    "item_id=%s",
-                    job_id,
-                    exc.phase,
-                    exc.category,
-                    exc.item_id,
-                )
-                raise IngestLLMResponseError(
-                    exc.category,
-                    exc.user_message,
-                ) from exc
-        else:
-            generated = self._generate_direct_ingest_result(
-                source=source,
-                source_path=source_path,
-                source_content=source_content,
-                job_id=job_id,
-                ingest_profile=ingest_profile,
-            )
+            else:
+                patches = [*generated.data.entity_patches, *generated.data.concept_patches]
+                if patches:
+                    for patch in generated.data.entity_patches:
+                        self._assert_allowed_wiki_output(patch.path, "entities")
+                    for patch in generated.data.concept_patches:
+                        self._assert_allowed_wiki_output(patch.path, "concepts")
+                    try:
+                        with self._wiki_lock:
+                            self._apply_existing_page_patches(
+                                patches=patches,
+                                selected_page_hashes=generated.selected_page_hashes,
+                            )
+                    except IngestConflictError as exc:
+                        if self._large_document_ingestor is None:
+                            raise
+                        LOGGER.warning(
+                            "Direct ingest patch is invalid; retrying staged ingest "
+                            "job_id=%s error=%s",
+                            job_id,
+                            exc,
+                        )
+                        generated = self._generate_staged_ingest_result(
+                            job=job,
+                            source=source,
+                            source_content=source_content,
+                            ingest_profile=ingest_profile,
+                        )
 
         data = generated.data
         selected_page_hashes = generated.selected_page_hashes
@@ -580,6 +598,43 @@ class IngestService:
             "contradictions": data.contradictions,
             "validation": validation,
         }
+
+    def _generate_staged_ingest_result(
+        self,
+        *,
+        job: IngestJobResponse,
+        source: Path,
+        source_content: str,
+        ingest_profile: IngestModelProfile,
+    ) -> IngestGenerationResult:
+        if self._large_document_ingestor is None:
+            raise RuntimeError("large-document ingestor is unavailable")
+        try:
+            return self._large_document_ingestor.ingest(
+                job=job,
+                source=source,
+                source_content=source_content,
+                ingest_profile=ingest_profile,
+                call_llm=lambda prompt, *, max_tokens: self._call_llm_with_retry(
+                    prompt,
+                    ingest_profile=ingest_profile,
+                    max_tokens=max_tokens,
+                    translate_truncation=False,
+                ),
+                progress_callback=lambda event: self._report_large_document_progress(
+                    job.job_id,
+                    event,
+                ),
+            )
+        except LargeDocumentStageError as exc:
+            LOGGER.warning(
+                "Large-document stage failed job_id=%s phase=%s category=%s item_id=%s",
+                job.job_id,
+                exc.phase,
+                exc.category,
+                exc.item_id,
+            )
+            raise IngestLLMResponseError(exc.category, exc.user_message) from exc
 
     def _report_large_document_progress(
         self,

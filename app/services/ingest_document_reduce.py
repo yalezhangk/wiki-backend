@@ -167,6 +167,11 @@ class DocumentKnowledgeReducer:
             plan = self._request_plan(hierarchical_prompt)
             allowed_evidence_ids = self._record_evidence_ids(records)
 
+        plan = self._align_page_supporting_chunks(
+            plan,
+            chunk_ids=chunk_ids,
+            evidence_owners=evidence_owners,
+        )
         self._validate_plan(
             plan,
             expected_chunk_ids=chunk_ids,
@@ -190,6 +195,32 @@ class DocumentKnowledgeReducer:
             len(plan.key_claims),
         )
         return plan
+
+    @staticmethod
+    def _align_page_supporting_chunks(
+        plan: IngestKnowledgePlan,
+        *,
+        chunk_ids: tuple[str, ...],
+        evidence_owners: dict[str, str],
+    ) -> IngestKnowledgePlan:
+        pages = []
+        for page in plan.planned_pages:
+            if any(evidence_id not in evidence_owners for evidence_id in page.supporting_evidence_ids):
+                pages.append(page)
+                continue
+            cited_chunks = {
+                evidence_owners[evidence_id]
+                for evidence_id in page.supporting_evidence_ids
+            }
+            supported_chunks = [chunk_id for chunk_id in chunk_ids if chunk_id in cited_chunks]
+            if supported_chunks != page.supporting_chunk_ids:
+                LOGGER.warning(
+                    "Aligned planned page chunks to cited evidence page=%s",
+                    page.path,
+                )
+                page = page.model_copy(update={"supporting_chunk_ids": supported_chunks})
+            pages.append(page)
+        return plan.model_copy(update={"planned_pages": pages})
 
     def _build_hierarchy(
         self,

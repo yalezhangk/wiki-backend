@@ -214,7 +214,7 @@ class DocumentKnowledgeReducerTests(unittest.TestCase):
                     "reduce_chunk_coverage_invalid",
                 )
 
-    def test_page_evidence_must_exist_and_belong_to_supporting_chunks(self) -> None:
+    def test_page_supporting_chunks_follow_cited_evidence_owners(self) -> None:
         extractions = (make_extraction(1), make_extraction(2))
         page = {
             "page_type": "source",
@@ -232,17 +232,16 @@ class DocumentKnowledgeReducerTests(unittest.TestCase):
             call_llm=caller,
         )
 
-        with self.assertRaises(DocumentReduceError) as context:
-            reducer.reduce(
-                extractions,
-                document_filename="manual.md",
-                today=date(2026, 10, 19),
-                job_id=19,
-            )
+        plan = reducer.reduce(
+            extractions,
+            document_filename="manual.md",
+            today=date(2026, 10, 19),
+            job_id=19,
+        )
 
         self.assertEqual(
-            context.exception.category,
-            "reduce_supporting_evidence_mismatch",
+            plan.planned_pages[0].supporting_chunk_ids,
+            [extractions[0].chunk_id],
         )
 
     def test_duplicate_entity_plan_is_rejected(self) -> None:
